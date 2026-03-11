@@ -101,24 +101,36 @@ export default function ChartTab({ data }) {
       } catch (e) {}
     }
 
-    // BB from indicators
-    const ind = data.indicators || {};
-    const bb = ind.bb_1h;
-    if (bb && sorted.length > 0) {
-      const lastTs = sorted[sorted.length - 1].ts;
-      // We only have latest BB values — show as horizontal reference lines
-      // Full BB would need history; use current as a point marker
+    // Bollinger Bands (20, 2) — computed from full candle history
+    const bbUpper = [];
+    const bbMid = [];
+    const bbLower = [];
+    const bbPeriod = 20;
+    for (let i = bbPeriod - 1; i < sorted.length; i++) {
+      const window = sorted.slice(i - bbPeriod + 1, i + 1).map(c => c.close);
+      const mean = window.reduce((s, v) => s + v, 0) / bbPeriod;
+      const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / bbPeriod;
+      const std = Math.sqrt(variance);
+      bbUpper.push({ time: sorted[i].ts, value: mean + 2 * std });
+      bbMid.push({  time: sorted[i].ts, value: mean });
+      bbLower.push({ time: sorted[i].ts, value: mean - 2 * std });
     }
+    try {
+      if (bbUpper.length) bbUpperSeries.current.setData(bbUpper);
+      if (bbMid.length)   bbMidSeries.current.setData(bbMid);
+      if (bbLower.length) bbLowerSeries.current.setData(bbLower);
+    } catch (e) {}
   }, [data.candles1h]);
 
   return (
     <div className="flex flex-col h-screen pb-20">
       <div className="px-4 pt-3 pb-2 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-gray-300">BTC/USD — 1H Chart</h2>
-        <div className="flex gap-3 text-xs">
+        <div className="flex gap-2 text-xs flex-wrap justify-end">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-[#F7931A] inline-block"/>EMA20</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-purple-400 inline-block"/>EMA50</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-blue-400 inline-block"/>EMA200</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-400/50 inline-block"/>BB</span>
         </div>
       </div>
       <div ref={chartRef} className="flex-1 chart-container" />

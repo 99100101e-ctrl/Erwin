@@ -52,6 +52,8 @@ export function useWebSocket() {
 
           setData({
             price: newPrice,
+            change24h: s.price_change_24h ?? null,   // e.g. -0.012 = -1.2%
+            volume24h: s.volume_24h ?? null,
             indicators: s.indicators || {},
             signal: s.signal || {},
             fearGreed: s.fear_greed || null,

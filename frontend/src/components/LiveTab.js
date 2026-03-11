@@ -37,7 +37,7 @@ function TrendBadge({ label, trend }) {
 }
 
 export default function LiveTab({ data, priceDirection }) {
-  const { price, indicators, signal, fearGreed, marketPhase, trend1h, trend4h, volatilityLevel } = data;
+  const { price, change24h, indicators, signal, fearGreed, marketPhase, trend1h, trend4h, volatilityLevel } = data;
 
   const ind = indicators || {};
   const rsi1h = ind.rsi_1h;
@@ -76,6 +76,11 @@ export default function LiveTab({ data, priceDirection }) {
         <div className={`text-5xl font-black tabular-nums transition-colors ${priceClass}`}>
           {price ? `$${fmt(price)}` : '—'}
         </div>
+        {change24h != null && (
+          <div className={`text-sm font-semibold mt-1 ${change24h >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {change24h >= 0 ? '▲' : '▼'} {pct(change24h)} (24h)
+          </div>
+        )}
         <div className="flex items-center justify-center gap-4 mt-2">
           <span className="text-xs text-gray-500">Market: <span className="text-white">{marketPhase}</span></span>
           <span className={`text-xs font-semibold ${volatilityColor}`}>
