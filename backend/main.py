@@ -509,9 +509,11 @@ async def fear_greed_loop():
 
 @app.get("/api/state")
 async def get_state():
-    """Return current full state (for initial page load)."""
+    """Return full state — polled by frontend every 3 seconds."""
     return JSONResponse(content={
         "price": state["price"],
+        "price_change_24h": state.get("price_change_24h"),
+        "volume_24h": state.get("volume_24h"),
         "indicators": _serialize_indicators(state.get("indicators", {})),
         "signal": state.get("signal", {}),
         "fear_greed": state.get("fear_greed"),

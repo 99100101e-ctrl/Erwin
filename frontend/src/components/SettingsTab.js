@@ -152,9 +152,9 @@ export default function SettingsTab({ data }) {
         <div className="text-sm font-semibold text-gray-300 mb-3">Connection Status</div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between">
-            <span className="text-gray-400">Phemex WebSocket</span>
-            <span className={data.connected ? 'text-green-400' : 'text-red-400'}>
-              {data.connected ? '● Connected' : '● Disconnected'}
+            <span className="text-gray-400">Binance data feed</span>
+            <span className={data.connected ? 'text-green-400' : 'text-yellow-400'}>
+              {data.connected ? '● Live' : '● Seeded / Offline'}
             </span>
           </div>
           <div className="flex justify-between">

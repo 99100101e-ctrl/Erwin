@@ -40,8 +40,8 @@ export default function App() {
           }`}></span>
           <span className="text-gray-400">
             {wsConnected && data.price ? 'Live'
-             : wsConnected ? 'Loading data...'
-             : 'Connecting...'}
+             : wsConnected ? 'Loading...'
+             : 'Offline'}
           </span>
         </div>
       </div>
