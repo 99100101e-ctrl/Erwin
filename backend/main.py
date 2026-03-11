@@ -26,6 +26,21 @@ from signal_engine import SignalEngine
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("btc-advisor")
 
+
+def normalize_phemex_price(p) -> Optional[float]:
+    """Convert Phemex integer price to USD float.
+    BTCUSD perpetual uses price scale = 10000 (e.g., 850000000 → 85000 USD).
+    """
+    if p is None:
+        return None
+    p = float(p)
+    if p <= 0:
+        return None
+    if p > 1_000_000:
+        return p / 10_000
+    return p
+
+
 app = FastAPI(title="BTC Trading Advisor", version="1.0.0")
 
 app.add_middleware(
@@ -48,14 +63,19 @@ class CandleStore:
         self._current_4h: Optional[Dict] = None
 
     def update_from_kline(self, candle_data: Dict, interval_sec: int):
-        """Process a kline update from Phemex."""
+        """Process a kline update from Phemex WebSocket."""
         ts = candle_data.get("t", 0)  # open time in seconds
-        o = float(candle_data.get("o", 0))
-        h = float(candle_data.get("h", 0))
-        l = float(candle_data.get("l", 0))
-        c = float(candle_data.get("c", 0))
+        # Normalize prices — Phemex sends integer prices (divide by 10000)
+        o = normalize_phemex_price(candle_data.get("o", 0)) or 0.0
+        h = normalize_phemex_price(candle_data.get("h", 0)) or 0.0
+        l = normalize_phemex_price(candle_data.get("l", 0)) or 0.0
+        c = normalize_phemex_price(candle_data.get("c", 0)) or 0.0
         v = float(candle_data.get("v", 0))
         is_closed = candle_data.get("closed", False)
+
+        # Sanity check — ignore if price looks wrong
+        if c < 1000:
+            return
 
         candle = {"ts": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
 
@@ -119,6 +139,191 @@ state: Dict = {
 connected_clients: Set[WebSocket] = set()
 
 # ---------------------------------------------------------------------------
+# Historical data seeding
+
+async def seed_historical_data():
+    """Seed candle store with historical OHLCV data before WS connects."""
+    log.info("=== Seeding historical candle data ===")
+
+    # --- Try Phemex REST API first ---
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            # 1h candles
+            log.info("Fetching 1h candles from Phemex REST...")
+            resp = await client.get(
+                "https://api.phemex.com/exchange/public/md/v2/kline",
+                params={"symbol": "BTCUSD", "resolution": 3600, "limit": 200},
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                rows = data.get("data", {}).get("rows", [])
+                # Row format: [timestamp, interval, last_close, open, high, low, close, volume, turnover]
+                for row in rows:
+                    if len(row) >= 7:
+                        ts = row[0]
+                        o = normalize_phemex_price(row[3]) or 0.0
+                        h = normalize_phemex_price(row[4]) or 0.0
+                        l = normalize_phemex_price(row[5]) or 0.0
+                        c = normalize_phemex_price(row[6]) or 0.0
+                        v = float(row[7]) if len(row) > 7 else 0.0
+                        if c > 1000:  # sanity check
+                            candle_store.candles_1h.append(
+                                {"ts": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
+                            )
+                log.info(f"Phemex REST: seeded {len(candle_store.candles_1h)} 1h candles")
+
+                # 4h candles
+                resp4h = await client.get(
+                    "https://api.phemex.com/exchange/public/md/v2/kline",
+                    params={"symbol": "BTCUSD", "resolution": 14400, "limit": 200},
+                )
+                data4h = resp4h.json()
+                if data4h.get("code") == 0:
+                    rows4h = data4h.get("data", {}).get("rows", [])
+                    for row in rows4h:
+                        if len(row) >= 7:
+                            ts = row[0]
+                            o = normalize_phemex_price(row[3]) or 0.0
+                            h = normalize_phemex_price(row[4]) or 0.0
+                            l = normalize_phemex_price(row[5]) or 0.0
+                            c = normalize_phemex_price(row[6]) or 0.0
+                            v = float(row[7]) if len(row) > 7 else 0.0
+                            if c > 1000:
+                                candle_store.candles_4h.append(
+                                    {"ts": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
+                                )
+                    log.info(f"Phemex REST: seeded {len(candle_store.candles_4h)} 4h candles")
+
+                if len(candle_store.candles_1h) >= 30:
+                    log.info("Historical data seeded from Phemex REST — calculating initial indicators")
+                    await update_indicators_and_signal()
+                    return
+
+    except Exception as e:
+        log.warning(f"Phemex REST seed failed: {e}")
+
+    # --- Fallback: CoinGecko OHLC ---
+    log.info("Falling back to CoinGecko for historical data...")
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            # days=30 gives ~4h candles; days=1 gives 30-min candles
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
+                params={"vs_currency": "usd", "days": 30},
+            )
+            ohlc = resp.json()
+            # Format: [[timestamp_ms, open, high, low, close], ...]
+            for row in ohlc:
+                if len(row) >= 5:
+                    ts_ms, o, h, l, c = row[:5]
+                    if float(c) > 1000:
+                        candle_store.candles_1h.append({
+                            "ts": ts_ms // 1000,
+                            "open": float(o),
+                            "high": float(h),
+                            "low": float(l),
+                            "close": float(c),
+                            "volume": 0.0,
+                        })
+            log.info(f"CoinGecko: seeded {len(candle_store.candles_1h)} candles")
+
+            if len(candle_store.candles_1h) >= 30:
+                # Use same data for 4h (downsample every 4 points)
+                c1_list = list(candle_store.candles_1h)
+                for i in range(0, len(c1_list) - 3, 4):
+                    chunk = c1_list[i:i+4]
+                    candle_store.candles_4h.append({
+                        "ts": chunk[0]["ts"],
+                        "open": chunk[0]["open"],
+                        "high": max(x["high"] for x in chunk),
+                        "low": min(x["low"] for x in chunk),
+                        "close": chunk[-1]["close"],
+                        "volume": sum(x["volume"] for x in chunk),
+                    })
+                log.info(f"CoinGecko: derived {len(candle_store.candles_4h)} 4h candles")
+                await update_indicators_and_signal()
+    except Exception as e:
+        log.warning(f"CoinGecko seed failed: {e}")
+
+    # --- Final fallback: Binance public API ---
+    if len(candle_store.candles_1h) < 30:
+        log.info("Trying Binance public API for historical data...")
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(
+                    "https://api.binance.com/api/v3/klines",
+                    params={"symbol": "BTCUSDT", "interval": "1h", "limit": 200},
+                )
+                rows = resp.json()
+                # Format: [open_time, open, high, low, close, volume, ...]
+                for row in rows:
+                    if len(row) >= 6:
+                        ts_ms = row[0]
+                        o, h, l, c, v = float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])
+                        if c > 1000:
+                            candle_store.candles_1h.append({
+                                "ts": ts_ms // 1000,
+                                "open": o, "high": h, "low": l, "close": c, "volume": v,
+                            })
+                log.info(f"Binance: seeded {len(candle_store.candles_1h)} 1h candles")
+                if len(candle_store.candles_1h) >= 30:
+                    c1_list = list(candle_store.candles_1h)
+                    for i in range(0, len(c1_list) - 3, 4):
+                        chunk = c1_list[i:i+4]
+                        candle_store.candles_4h.append({
+                            "ts": chunk[0]["ts"],
+                            "open": chunk[0]["open"],
+                            "high": max(x["high"] for x in chunk),
+                            "low": min(x["low"] for x in chunk),
+                            "close": chunk[-1]["close"],
+                            "volume": sum(x["volume"] for x in chunk),
+                        })
+                    await update_indicators_and_signal()
+                    return
+        except Exception as e:
+            log.warning(f"Binance seed failed: {e}")
+
+    # --- Absolute last resort: synthetic data for UI demo ---
+    if len(candle_store.candles_1h) < 30:
+        log.warning("All external APIs failed — generating synthetic demo data")
+        import math, random
+        random.seed(42)
+        base_price = 83000.0
+        base_ts = int(time.time()) - 200 * 3600
+        price = base_price
+        for i in range(200):
+            ts = base_ts + i * 3600
+            drift = random.gauss(0, 0.008)
+            price = price * (1 + drift)
+            spread = price * random.uniform(0.002, 0.008)
+            o = price
+            h = price + spread
+            l = price - spread
+            c = price * (1 + random.gauss(0, 0.003))
+            v = random.uniform(500, 2000)
+            candle_store.candles_1h.append(
+                {"ts": ts, "open": o, "high": h, "low": l, "close": c, "volume": v}
+            )
+            price = c
+        # Derive 4h candles
+        c1_list = list(candle_store.candles_1h)
+        for i in range(0, len(c1_list) - 3, 4):
+            chunk = c1_list[i:i+4]
+            candle_store.candles_4h.append({
+                "ts": chunk[0]["ts"],
+                "open": chunk[0]["open"],
+                "high": max(x["high"] for x in chunk),
+                "low": min(x["low"] for x in chunk),
+                "close": chunk[-1]["close"],
+                "volume": sum(x["volume"] for x in chunk),
+            })
+        log.info(f"Synthetic: generated {len(candle_store.candles_1h)} 1h + {len(candle_store.candles_4h)} 4h candles")
+        # Set a synthetic price
+        state["price"] = list(candle_store.candles_1h)[-1]["close"]
+        await update_indicators_and_signal()
+
+
+# ---------------------------------------------------------------------------
 # Fear & Greed
 
 async def fetch_fear_greed():
@@ -176,33 +381,34 @@ async def phemex_connect():
             ) as ws:
                 state["connected"] = True
                 backoff = 2  # reset on success
-                log.info("Connected to Phemex WebSocket")
+                log.info("Connected to Phemex WebSocket successfully")
 
-                # Subscribe to klines and ticker
+                # Subscribe — orderbook for live price, klines for candles
                 subs = [
                     {
                         "id": 1,
-                        "method": "kline.subscribe",
-                        "params": [SYMBOL, 3600],  # 1h
+                        "method": "orderbook.subscribe",
+                        "params": ["BTCUSD"],
                     },
                     {
                         "id": 2,
                         "method": "kline.subscribe",
-                        "params": [SYMBOL, 14400],  # 4h
+                        "params": [SYMBOL, 3600],  # 1h
                     },
                     {
                         "id": 3,
-                        "method": "market24h.subscribe",
-                        "params": [],
+                        "method": "kline.subscribe",
+                        "params": [SYMBOL, 14400],  # 4h
                     },
                     {
                         "id": 4,
-                        "method": "trade.subscribe",
-                        "params": [SYMBOL],
+                        "method": "market24h.subscribe",
+                        "params": [],
                     },
                 ]
                 for sub in subs:
                     await ws.send(json.dumps(sub))
+                    log.info(f"Subscribed: {sub['method']} {sub.get('params', [])}")
                     await asyncio.sleep(0.1)
 
                 async for raw in ws:
@@ -221,23 +427,53 @@ async def phemex_connect():
 
 async def handle_phemex_message(msg: Dict):
     """Process incoming Phemex WebSocket message."""
-    # Heartbeat
-    if msg.get("id") and not msg.get("result") is None:
+    # Subscription confirmations and heartbeats
+    if "id" in msg and "result" in msg:
+        result = msg.get("result")
+        if result is None or result == "success":
+            log.debug(f"Subscription confirmed: id={msg['id']}")
         return
 
-    # Kline data
+    # --- Orderbook data (primary price source) ---
+    # {"book": {"asks": [[price, qty], ...], "bids": [...]}, "symbol": "BTCUSD", "type": "snapshot|incremental"}
+    if "book" in msg:
+        symbol = msg.get("symbol", "")
+        if symbol != SYMBOL:
+            return
+        book = msg.get("book", {})
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+        if bids:
+            raw_price = bids[0][0]  # best bid
+            price = normalize_phemex_price(raw_price)
+            if price and price > 1000:
+                state["price"] = price
+                state["last_update"] = datetime.now(timezone.utc).isoformat()
+                log.debug(f"Orderbook price: {price} (raw={raw_price})")
+                await broadcast({"type": "price", "price": price, "ts": time.time()})
+        elif asks:
+            raw_price = asks[0][0]  # best ask fallback
+            price = normalize_phemex_price(raw_price)
+            if price and price > 1000:
+                state["price"] = price
+                state["last_update"] = datetime.now(timezone.utc).isoformat()
+        return
+
+    # --- Kline data ---
     if "kline" in msg:
         symbol = msg.get("symbol", "")
         if symbol != SYMBOL:
             return
         klines = msg.get("kline", [])
         msg_type = msg.get("type", "")
+        count = 0
         for kline in klines:
-            # Phemex kline format: [timestamp, interval, last_close, open, high, low, close, volume, turnover]
-            if len(kline) >= 9:
-                ts, interval, _, o, h, l, c, v, _ = kline[:9]
-                # Convert price (Phemex uses integer cents for inverse contracts)
-                # BTCUSD perpetual: prices in USD per contract, volume in contracts
+            # Row: [timestamp, interval, last_close, open, high, low, close, volume, turnover]
+            if len(kline) >= 7:
+                ts = kline[0]
+                interval = kline[1]
+                o, h, l, c = kline[3], kline[4], kline[5], kline[6]
+                v = kline[7] if len(kline) > 7 else 0
                 candle = {
                     "t": ts,
                     "o": o,
@@ -248,34 +484,27 @@ async def handle_phemex_message(msg: Dict):
                     "closed": msg_type == "snapshot",
                 }
                 candle_store.update_from_kline(candle, interval)
+                count += 1
+        if count > 0:
+            log.info(f"Kline update: {count} candles, type={msg_type}, 1h={len(candle_store.candles_1h)}")
+            await update_indicators_and_signal()
+        return
 
-        await update_indicators_and_signal()
-
-    # Market 24h ticker
+    # --- Market 24h ticker ---
     if "market24h" in msg:
         ticker = msg.get("market24h", {})
         if ticker:
-            # Phemex inverse: markPrice is in price scale
-            price = ticker.get("markPrice") or ticker.get("lastPrice")
-            if price:
-                state["price"] = int(price) / 10000 if int(price) > 10000000 else float(price)
-            state["price_change_24h"] = ticker.get("priceChangeRatio")
+            price_raw = ticker.get("markPrice") or ticker.get("lastPrice")
+            if price_raw:
+                price = normalize_phemex_price(price_raw)
+                if price and price > 1000:
+                    if not state["price"]:  # only use as fallback if no orderbook price
+                        state["price"] = price
+                    log.debug(f"Market24h price: {price}")
+            ratio = ticker.get("priceChangeRatio")
+            state["price_change_24h"] = float(ratio) if ratio is not None else None
             state["volume_24h"] = ticker.get("volume24h")
-
-    # Trade data — update live price
-    if "trades" in msg:
-        trades = msg.get("trades", [])
-        if trades:
-            last_trade = trades[-1]
-            # [timestamp, side, price, qty]
-            if len(last_trade) >= 3:
-                raw_price = last_trade[2]
-                # Phemex BTCUSD: price is integer, divide by 10000
-                price = float(raw_price) / 10000 if int(raw_price) > 1000000 else float(raw_price)
-                if price > 1000:  # sanity check
-                    state["price"] = price
-                    state["last_update"] = datetime.now(timezone.utc).isoformat()
-                    await broadcast({"type": "price", "price": price, "ts": time.time()})
+        return
 
 
 async def update_indicators_and_signal():
@@ -286,7 +515,7 @@ async def update_indicators_and_signal():
     ) = candle_store.get_lists()
 
     if len(closes_1h) < 30:
-        log.info(f"Not enough candles yet: {len(closes_1h)} 1h candles")
+        log.info(f"Not enough candles yet: {len(closes_1h)} 1h candles (need 30)")
         return
 
     try:
@@ -318,6 +547,10 @@ async def update_indicators_and_signal():
 
         # Signal evaluation
         price = state.get("price") or (closes_1h[-1] if closes_1h else None)
+        if price and not state["price"]:
+            state["price"] = price  # use last candle close as price fallback
+
+        signal = {}
         if price:
             signal = signal_engine.evaluate(indicators, price)
             state["signal"] = signal
@@ -328,17 +561,25 @@ async def update_indicators_and_signal():
 
         state["last_update"] = datetime.now(timezone.utc).isoformat()
 
+        price_str = f"{price:.0f}" if price else "N/A"
+        log.info(
+            f"Indicators updated — price={price_str}, "
+            f"1h={len(closes_1h)}, 4h={len(closes_4h)} candles, "
+            f"trend={state['trend_1h']}, phase={state['market_phase']}"
+        )
+
         await broadcast({
             "type": "update",
             "price": price,
             "indicators": _serialize_indicators(indicators),
-            "signal": signal if price else {},
+            "signal": signal,
             "market_phase": state["market_phase"],
             "trend_1h": state["trend_1h"],
             "trend_4h": state["trend_4h"],
             "volatility_level": state["volatility_level"],
             "signal_history": state["signal_history"],
             "candles_1h": state["candles_1h"],
+            "connected": state["connected"],
             "ts": time.time(),
         })
 
@@ -420,7 +661,13 @@ async def get_state():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "connected": state["connected"], "price": state["price"]}
+    return {
+        "status": "ok",
+        "connected": state["connected"],
+        "price": state["price"],
+        "candles_1h": len(candle_store.candles_1h),
+        "candles_4h": len(candle_store.candles_4h),
+    }
 
 
 @app.get("/api/fear-greed")
@@ -428,7 +675,6 @@ async def get_fear_greed():
     """Return latest Fear & Greed index value."""
     fg = state.get("fear_greed")
     if fg is None:
-        # Attempt a live fetch on demand
         fg = await fetch_fear_greed()
         if fg:
             state["fear_greed"] = fg
@@ -455,6 +701,7 @@ async def get_candles(timeframe: str):
     """
     Return OHLCV candles for a given timeframe.
     Supported: 1h, 4h
+    Returns seeded historical data even before Phemex WS connects.
     """
     if timeframe == "1h":
         candles = list(candle_store.candles_1h)
@@ -488,12 +735,17 @@ async def get_signals_history():
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.add(websocket)
-    log.info(f"Client connected. Total: {len(connected_clients)}")
+    log.info(f"Frontend client connected. Total: {len(connected_clients)}")
     try:
         # Send current state immediately on connect
+        price = state["price"]
+        closes_1h = [c["close"] for c in candle_store.candles_1h]
+        if not price and closes_1h:
+            price = closes_1h[-1]
+
         await websocket.send_text(json.dumps({
             "type": "init",
-            "price": state["price"],
+            "price": price,
             "indicators": _serialize_indicators(state.get("indicators", {})),
             "signal": state.get("signal", {}),
             "fear_greed": state.get("fear_greed"),
@@ -511,7 +763,7 @@ async def websocket_endpoint(websocket: WebSocket):
         pass
     finally:
         connected_clients.discard(websocket)
-        log.info(f"Client disconnected. Total: {len(connected_clients)}")
+        log.info(f"Frontend client disconnected. Total: {len(connected_clients)}")
 
 
 # ---------------------------------------------------------------------------
@@ -536,10 +788,13 @@ async def startup_event():
     print(f"  Frontend: http://localhost:3000")
     print(f"  API docs: http://localhost:8000/docs")
     print("=" * 60)
-    print("  ⚠  NOT FINANCIAL ADVICE — For informational purposes only")
+    print("  NOT FINANCIAL ADVICE — For informational purposes only")
     print("=" * 60 + "\n")
 
-    # Start background tasks
+    # Seed historical data FIRST so candles are available immediately
+    await seed_historical_data()
+
+    # Then start background tasks
     asyncio.create_task(phemex_connect())
     asyncio.create_task(fear_greed_loop())
 

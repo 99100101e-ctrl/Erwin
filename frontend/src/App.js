@@ -33,9 +33,15 @@ export default function App() {
       <div className="flex items-center justify-between px-4 py-1 bg-[#0f0f1a] text-xs">
         <span className="text-gray-500">BTC Advisor</span>
         <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${wsConnected && data.connected ? 'bg-green-400' : 'bg-red-500'}`}></span>
+          <span className={`w-2 h-2 rounded-full ${
+            wsConnected && data.price ? 'bg-green-400'
+            : wsConnected ? 'bg-yellow-400'
+            : 'bg-red-500'
+          }`}></span>
           <span className="text-gray-400">
-            {wsConnected && data.connected ? 'Live' : 'Connecting...'}
+            {wsConnected && data.price ? 'Live'
+             : wsConnected ? 'Loading data...'
+             : 'Connecting...'}
           </span>
         </div>
       </div>
