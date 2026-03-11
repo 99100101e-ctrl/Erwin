@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #1a1a2e;
+  color: #e2e8f0;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: #1e1e2e;
+}
+::-webkit-scrollbar-thumb {
+  background: #F7931A;
+  border-radius: 2px;
+}
+
+/* Score bar animation */
+.score-bar {
+  transition: width 0.8s ease-in-out;
+}
+
+/* Price flash animations */
+@keyframes flash-green {
+  0% { color: #4ade80; text-shadow: 0 0 12px #4ade80; }
+  100% { color: #4ade80; text-shadow: none; }
+}
+@keyframes flash-red {
+  0% { color: #f87171; text-shadow: 0 0 12px #f87171; }
+  100% { color: #f87171; text-shadow: none; }
+}
+.price-up { animation: flash-green 1.5s ease-out; color: #4ade80; }
+.price-down { animation: flash-red 1.5s ease-out; color: #f87171; }
+
+/* Glowing signal badges */
+.signal-strong-buy {
+  background: linear-gradient(135deg, #14532d, #166534);
+  border: 1px solid #4ade80;
+  box-shadow: 0 0 20px rgba(74, 222, 128, 0.3);
+}
+.signal-strong-sell {
+  background: linear-gradient(135deg, #7f1d1d, #991b1b);
+  border: 1px solid #f87171;
+  box-shadow: 0 0 20px rgba(248, 113, 113, 0.3);
+}
+.signal-moderate-buy {
+  background: linear-gradient(135deg, #1a3a1a, #1e4a1e);
+  border: 1px solid #86efac;
+}
+.signal-moderate-sell {
+  background: linear-gradient(135deg, #3a1a1a, #4a1e1e);
+  border: 1px solid #fca5a5;
+}
+.signal-hold {
+  background: linear-gradient(135deg, #1e1e3a, #252545);
+  border: 1px solid #6366f1;
+}
+.signal-wait {
+  background: linear-gradient(135deg, #1e1e2e, #252535);
+  border: 1px solid #64748b;
+}
+
+/* Glass card effect */
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+}
+
+/* Tab bar */
+.tab-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(22, 33, 62, 0.95);
+  backdrop-filter: blur(20px);
+  border-top: 1px solid rgba(247, 147, 26, 0.2);
+  padding-bottom: env(safe-area-inset-bottom);
+  z-index: 100;
+}
+
+/* Volatility warning */
+@keyframes pulse-warning {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+.volatility-extreme {
+  animation: pulse-warning 1s ease-in-out infinite;
+}
+
+/* Chart container */
+.chart-container {
+  background: #0f0f1a;
+  border-radius: 8px;
+  overflow: hidden;
+}

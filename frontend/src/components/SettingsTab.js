@@ -1,0 +1,186 @@
+import React, { useState, useEffect } from 'react';
+
+const DEFAULT_SETTINGS = {
+  portfolioSize: 10000,
+  riskPct: 2,
+  currency: 'USD',
+  notifications: false,
+  theme: 'dark',
+};
+
+function fmt(n, d = 0) {
+  if (n == null) return '—';
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+export default function SettingsTab({ data }) {
+  const [settings, setSettings] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('btc-advisor-settings') || 'null') || DEFAULT_SETTINGS;
+    } catch {
+      return DEFAULT_SETTINGS;
+    }
+  });
+  const [pnl, setPnl] = useState({ trades: [], total: 0 });
+
+  // Load P&L from localStorage
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('btc-advisor-pnl') || '[]');
+      const total = saved.reduce((s, t) => s + (t.pnl || 0), 0);
+      setPnl({ trades: saved, total });
+    } catch {}
+  }, []);
+
+  const save = (newSettings) => {
+    setSettings(newSettings);
+    localStorage.setItem('btc-advisor-settings', JSON.stringify(newSettings));
+  };
+
+  const positionSize = (settings.portfolioSize * (settings.riskPct / 100)).toFixed(2);
+  const signal = data.signal || {};
+
+  const riskAmt = signal.stop_loss && data.price
+    ? Math.abs(data.price - signal.stop_loss)
+    : null;
+  const contracts = riskAmt
+    ? Math.floor(parseFloat(positionSize) / riskAmt)
+    : null;
+
+  return (
+    <div className="px-4 pt-4 pb-6 max-w-lg mx-auto space-y-4">
+      <h2 className="text-lg font-bold">Settings & Portfolio</h2>
+
+      {/* Portfolio settings */}
+      <div className="glass-card p-4 space-y-4">
+        <div className="text-sm font-semibold text-gray-300 mb-1">Portfolio Settings</div>
+
+        <div>
+          <label className="text-xs text-gray-400 mb-1 block">Portfolio Size (USD)</label>
+          <input
+            type="number"
+            value={settings.portfolioSize}
+            onChange={e => save({ ...settings, portfolioSize: parseFloat(e.target.value) || 0 })}
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="text-xs text-gray-400 mb-1 block">Risk per Trade (%)</label>
+          <input
+            type="number"
+            min="0.1"
+            max="10"
+            step="0.1"
+            value={settings.riskPct}
+            onChange={e => save({ ...settings, riskPct: parseFloat(e.target.value) || 2 })}
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+          />
+          <div className="text-xs text-yellow-400 mt-1">Max recommended: 2%</div>
+        </div>
+      </div>
+
+      {/* Position calculator */}
+      <div className="glass-card p-4">
+        <div className="text-sm font-semibold text-gray-300 mb-3">Position Calculator</div>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="text-center">
+            <div className="text-xs text-gray-500 mb-1">Risk Amount</div>
+            <div className="text-xl font-bold text-yellow-400">${fmt(parseFloat(positionSize), 2)}</div>
+          </div>
+          <div className="text-center">
+            <div className="text-xs text-gray-500 mb-1">Portfolio</div>
+            <div className="text-xl font-bold text-white">${fmt(settings.portfolioSize)}</div>
+          </div>
+        </div>
+        {contracts && (
+          <div className="mt-3 text-center">
+            <div className="text-xs text-gray-500 mb-1">Estimated Contracts (based on current signal)</div>
+            <div className="text-2xl font-black text-[#F7931A]">{contracts}</div>
+          </div>
+        )}
+        {!contracts && (
+          <div className="text-xs text-gray-600 text-center mt-2">
+            Generate a signal to see position size
+          </div>
+        )}
+      </div>
+
+      {/* P&L tracker */}
+      <div className="glass-card p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold text-gray-300">P&L Tracker</div>
+          <div className={`text-lg font-black ${pnl.total >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {pnl.total >= 0 ? '+' : ''}${fmt(pnl.total, 2)}
+          </div>
+        </div>
+        {pnl.trades.length === 0 ? (
+          <div className="text-xs text-gray-600 text-center py-4">
+            No trades recorded yet.<br/>
+            Trades are tracked automatically when signals are generated.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {pnl.trades.slice(0, 10).map((t, i) => (
+              <div key={i} className="flex justify-between text-xs">
+                <span className="text-gray-400">{t.signal}</span>
+                <span className={t.pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+                  {t.pnl >= 0 ? '+' : ''}${fmt(t.pnl, 2)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Network info */}
+      <div className="glass-card p-4">
+        <div className="text-sm font-semibold text-gray-300 mb-3">iPhone Access</div>
+        <div className="text-xs text-gray-400 space-y-1">
+          <div>To access on iPhone, connect to the same WiFi network and visit:</div>
+          <div className="bg-gray-900 rounded p-2 font-mono text-[#F7931A] break-all">
+            http://YOUR_PC_IP:3000
+          </div>
+          <div className="text-gray-600">
+            Find your PC's local IP in the backend startup message.
+          </div>
+        </div>
+      </div>
+
+      {/* Connection status */}
+      <div className="glass-card p-4">
+        <div className="text-sm font-semibold text-gray-300 mb-3">Connection Status</div>
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between">
+            <span className="text-gray-400">Phemex WebSocket</span>
+            <span className={data.connected ? 'text-green-400' : 'text-red-400'}>
+              {data.connected ? '● Connected' : '● Disconnected'}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-400">Last update</span>
+            <span className="text-gray-300">
+              {data.lastUpdate ? new Date(data.lastUpdate).toLocaleTimeString() : '—'}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-400">Current price</span>
+            <span className="text-white font-bold">
+              {data.price ? `$${fmt(data.price)}` : '—'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Disclaimer */}
+      <div className="glass-card p-4 border border-yellow-900/50">
+        <div className="text-xs font-semibold text-yellow-400 uppercase mb-2">⚠️ Disclaimer</div>
+        <div className="text-xs text-gray-400">
+          This application is for <strong className="text-white">informational purposes only</strong> and
+          does not constitute financial advice. Trading cryptocurrencies involves significant risk of loss.
+          Always do your own research and never invest more than you can afford to lose.
+        </div>
+      </div>
+    </div>
+  );
+}
