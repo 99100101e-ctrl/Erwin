@@ -23,44 +23,9 @@ export function useWebSocket() {
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
+  const unmountedRef = useRef(false);
   const prevPrice = useRef(null);
   const [priceDirection, setPriceDirection] = useState(null);
-
-  const connect = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-
-    try {
-      const ws = new WebSocket(WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setWsConnected(true);
-        console.log('WebSocket connected');
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          handleMessage(msg);
-        } catch (e) {
-          console.warn('WS parse error:', e);
-        }
-      };
-
-      ws.onclose = () => {
-        setWsConnected(false);
-        console.log('WebSocket disconnected, reconnecting...');
-        reconnectTimer.current = setTimeout(connect, 3000);
-      };
-
-      ws.onerror = (err) => {
-        console.warn('WebSocket error:', err);
-      };
-    } catch (e) {
-      console.error('WebSocket connect error:', e);
-      reconnectTimer.current = setTimeout(connect, 5000);
-    }
-  }, []);
 
   const handleMessage = useCallback((msg) => {
     const type = msg.type;
@@ -73,7 +38,6 @@ export function useWebSocket() {
           setTimeout(() => setPriceDirection(null), 1500);
         }
         prevPrice.current = newPrice;
-
         return {
           price: newPrice,
           indicators: msg.indicators || prev.indicators,
@@ -104,15 +68,87 @@ export function useWebSocket() {
     }
   }, []);
 
+  const connect = useCallback(() => {
+    if (unmountedRef.current) return;
+
+    // Don't open a new socket if one is already open or mid-handshake
+    if (
+      wsRef.current &&
+      (wsRef.current.readyState === WebSocket.OPEN ||
+        wsRef.current.readyState === WebSocket.CONNECTING)
+    ) return;
+
+    // Clear any pending reconnect before starting a fresh connection
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+
+    console.log('WebSocket connecting to', WS_URL);
+    let ws;
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch (e) {
+      console.error('WebSocket constructor error:', e);
+      reconnectTimer.current = setTimeout(connect, 5000);
+      return;
+    }
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      // Guard: ignore if this socket was replaced by a newer one
+      if (wsRef.current !== ws) return;
+      setWsConnected(true);
+      console.log('WebSocket connected');
+    };
+
+    ws.onmessage = (event) => {
+      if (wsRef.current !== ws) return;
+      try {
+        handleMessage(JSON.parse(event.data));
+      } catch (e) {
+        console.warn('WS parse error:', e);
+      }
+    };
+
+    ws.onclose = () => {
+      // Guard: only react if this is still the active socket
+      if (wsRef.current !== ws) return;
+      setWsConnected(false);
+      if (!unmountedRef.current) {
+        console.log('WebSocket closed — reconnecting in 3s...');
+        reconnectTimer.current = setTimeout(connect, 3000);
+      }
+    };
+
+    ws.onerror = () => {
+      // onclose fires automatically after onerror; reconnect is handled there
+      console.warn('WebSocket error (will reconnect on close)');
+    };
+  }, [handleMessage]);
+
   useEffect(() => {
+    unmountedRef.current = false;
     connect();
     return () => {
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      if (wsRef.current) wsRef.current.close();
+      unmountedRef.current = true;
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+      // Detach handlers before closing so onclose won't schedule a reconnect
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
   }, [connect]);
 
-  // Also fetch initial state via REST
+  // Fetch initial state via REST as a fast path before WS delivers data
   useEffect(() => {
     fetch('/api/state')
       .then(r => r.json())
