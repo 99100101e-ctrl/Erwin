@@ -423,6 +423,64 @@ async def health():
     return {"status": "ok", "connected": state["connected"], "price": state["price"]}
 
 
+@app.get("/api/fear-greed")
+async def get_fear_greed():
+    """Return latest Fear & Greed index value."""
+    fg = state.get("fear_greed")
+    if fg is None:
+        # Attempt a live fetch on demand
+        fg = await fetch_fear_greed()
+        if fg:
+            state["fear_greed"] = fg
+    return JSONResponse(content=fg or {"value": None, "classification": "Unknown"})
+
+
+@app.get("/api/portfolio")
+async def get_portfolio():
+    """Return portfolio-related state: price, 24h change, volume."""
+    return JSONResponse(content={
+        "price": state.get("price"),
+        "price_change_24h": state.get("price_change_24h"),
+        "volume_24h": state.get("volume_24h"),
+        "volatility_level": state.get("volatility_level", "Low"),
+        "market_phase": state.get("market_phase", "Unknown"),
+        "trend_1h": state.get("trend_1h", "Neutral"),
+        "trend_4h": state.get("trend_4h", "Neutral"),
+        "last_update": state.get("last_update"),
+    })
+
+
+@app.get("/api/candles/{timeframe}")
+async def get_candles(timeframe: str):
+    """
+    Return OHLCV candles for a given timeframe.
+    Supported: 1h, 4h
+    """
+    if timeframe == "1h":
+        candles = list(candle_store.candles_1h)
+        if candle_store._current_1h:
+            candles = candles + [candle_store._current_1h]
+    elif timeframe == "4h":
+        candles = list(candle_store.candles_4h)
+        if candle_store._current_4h:
+            candles = candles + [candle_store._current_4h]
+    else:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unsupported timeframe '{timeframe}'. Use 1h or 4h."},
+        )
+    return JSONResponse(content={"timeframe": timeframe, "candles": candles, "count": len(candles)})
+
+
+@app.get("/api/signals/history")
+async def get_signals_history():
+    """Return last 20 trading signals."""
+    return JSONResponse(content={
+        "history": signal_engine.signal_history,
+        "count": len(signal_engine.signal_history),
+    })
+
+
 # ---------------------------------------------------------------------------
 # WebSocket endpoint
 
