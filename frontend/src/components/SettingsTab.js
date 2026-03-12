@@ -9,6 +9,8 @@ const DEFAULT_SETTINGS = {
   notifyPriceAlerts: true,
   priceAlertAbove: '',
   priceAlertBelow: '',
+  btcAmount: '',
+  avgBuyPrice: '',
   theme: 'dark',
 };
 
@@ -64,6 +66,18 @@ export default function SettingsTab({ data }) {
 
   const positionSize = (settings.portfolioSize * (settings.riskPct / 100)).toFixed(2);
   const signal = data.signal || {};
+
+  // Unrealized P&L
+  const btcAmt = parseFloat(settings.btcAmount) || 0;
+  const avgBuy = parseFloat(settings.avgBuyPrice) || 0;
+  const currentPrice = data.price || 0;
+  const unrealizedPnl = btcAmt && avgBuy && currentPrice
+    ? (currentPrice - avgBuy) * btcAmt
+    : null;
+  const unrealizedPct = btcAmt && avgBuy && currentPrice
+    ? ((currentPrice - avgBuy) / avgBuy) * 100
+    : null;
+  const costBasis = btcAmt && avgBuy ? btcAmt * avgBuy : null;
 
   const riskAmt = signal.stop_loss && data.price
     ? Math.abs(data.price - signal.stop_loss)
@@ -213,6 +227,68 @@ export default function SettingsTab({ data }) {
           />
           <div className="text-xs text-yellow-400 mt-1">Max recommended: 2%</div>
         </div>
+      </div>
+
+      {/* BTC Holdings & Unrealized P&L */}
+      <div className="glass-card p-4 space-y-3">
+        <div className="text-sm font-semibold text-gray-300 mb-1">BTC Holdings</div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Amount (BTC)</label>
+            <input
+              type="number"
+              min="0"
+              step="0.001"
+              placeholder="e.g. 0.5"
+              value={settings.btcAmount}
+              onChange={e => save({ ...settings, btcAmount: e.target.value })}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Avg Buy Price ($)</label>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              placeholder="e.g. 95000"
+              value={settings.avgBuyPrice}
+              onChange={e => save({ ...settings, avgBuyPrice: e.target.value })}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+            />
+          </div>
+        </div>
+
+        {unrealizedPnl !== null ? (
+          <div className="mt-2 bg-gray-900 rounded-lg p-3 space-y-2">
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-gray-400">Unrealized P&L</span>
+              <span className={`text-base font-black ${unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {unrealizedPnl >= 0 ? '+' : ''}${fmt(unrealizedPnl, 2)}
+                <span className="text-xs font-normal ml-1">
+                  ({unrealizedPct >= 0 ? '+' : ''}{unrealizedPct.toFixed(2)}%)
+                </span>
+              </span>
+            </div>
+            <div className="flex justify-between text-xs text-gray-500">
+              <span>Cost basis</span>
+              <span>${fmt(costBasis, 2)}</span>
+            </div>
+            <div className="flex justify-between text-xs text-gray-500">
+              <span>Current value</span>
+              <span className="text-white">${fmt(btcAmt * currentPrice, 2)}</span>
+            </div>
+            <div className="flex justify-between text-xs text-gray-500">
+              <span>Break-even price</span>
+              <span className="text-yellow-400">${fmt(avgBuy)}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-gray-600 text-center py-2">
+            Enter your BTC amount and average buy price to see unrealized P&L
+          </div>
+        )}
       </div>
 
       {/* Position calculator */}
