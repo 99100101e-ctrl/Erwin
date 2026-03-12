@@ -1,3 +1,5 @@
+from asyncio import create_task
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -21,7 +23,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup() -> None:
-    await engine.initialize()
+    create_task(engine.initialize())
 
 
 @app.get("/api/state")

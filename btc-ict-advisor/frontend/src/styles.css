@@ -8,6 +8,7 @@ body { margin: 0; background: #0d1117; }
 .status { font-size: 12px; font-weight: 700; }
 .status.online { color: #3fb950; }
 .status.offline { color: #f85149; }
+.hint { font-size: 12px; color: #f0b429; margin-top: 4px; }
 .tf-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .tf-row button { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 6px 10px; }
 .tf-row button.active { border-color: #58a6ff; color: #58a6ff; }

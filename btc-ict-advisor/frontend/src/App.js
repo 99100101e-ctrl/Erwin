@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 
-const API = "http://localhost:8001";
+const apiHost = process.env.REACT_APP_API_HOST || window.location.hostname || "localhost";
+const API = `http://${apiHost}:8001`;
 const tabs = ["LIVE", "CHART", "SIGNAL", "SESSIONS", "BACKTEST", "SETTINGS"];
 const tfs = ["15m", "1h", "4h", "1d", "1w"];
 
@@ -17,7 +18,7 @@ export default function App() {
   useEffect(() => {
     const fetchHistory = async () => {
       try {
-        const { data } = await axios.get(`${API}/api/history/status`);
+        const { data } = await axios.get(`${API}/api/history/status`, { timeout: 4000 });
         setHistory(data);
         setApiOnline(true);
       } catch {
@@ -25,7 +26,7 @@ export default function App() {
       }
     };
     fetchHistory();
-    const id = setInterval(fetchHistory, 1500);
+    const id = setInterval(fetchHistory, 2000);
     return () => clearInterval(id);
   }, []);
 
@@ -33,8 +34,8 @@ export default function App() {
     const load = async () => {
       try {
         const [stateResp, indResp] = await Promise.all([
-          axios.get(`${API}/api/state`),
-          axios.get(`${API}/api/indicators`),
+          axios.get(`${API}/api/state`, { timeout: 4000 }),
+          axios.get(`${API}/api/indicators`, { timeout: 4000 }),
         ]);
         setState(stateResp.data);
         setIndicatorData(indResp.data);
@@ -51,7 +52,7 @@ export default function App() {
   useEffect(() => {
     const loadChart = async () => {
       try {
-        const { data } = await axios.get(`${API}/api/chart/${chartTf}`);
+        const { data } = await axios.get(`${API}/api/chart/${chartTf}`, { timeout: 5000 });
         setChartData(data);
       } catch {
         setChartData({ candles: [], label: "Chart unavailable" });
@@ -74,6 +75,7 @@ export default function App() {
           API: {apiOnline ? "ONLINE" : "OFFLINE"}
           {state?.connection_status ? ` • Feed: ${state.connection_status}` : ""}
         </p>
+        {!apiOnline && <p className="hint">Backend non joignable: vérifie `http://{apiHost}:8001/api/state`.</p>}
       </header>
 
       {!history.all_data_ready && (
@@ -83,7 +85,7 @@ export default function App() {
             <p key={item.timeframe}>{item.message}</p>
           ))}
           <div className="bar">
-            <div className="fill" style={{ width: `${(history.items.length / 5) * 100}%` }} />
+            <div className="fill" style={{ width: `${(history.items.filter((x) => x.done).length / 5) * 100}%` }} />
           </div>
           <p>{history.message}</p>
         </section>
@@ -92,18 +94,12 @@ export default function App() {
       {activeTab === "LIVE" && (
         <section className="card">
           <h2>${state?.price?.toLocaleString() || "-"}</h2>
-          <p>
-            Signal: <strong>{state?.signal || "WAIT"}</strong>
-          </p>
+          <p>Signal: <strong>{state?.signal || "WAIT"}</strong></p>
           <p>HTF Bias: {state?.htf_bias_score || "-"}</p>
           <p>Daily Bias: {state?.daily_bias || "-"}</p>
           <p>Kill Zone: {state?.kill_zone || "-"}</p>
-          <div className="bar">
-            <div className="fill" style={scoreStyle} />
-          </div>
-          <p>
-            {state?.score || 0}% score ({state?.confirmed || 0}/{state?.total || 0} indicators confirming)
-          </p>
+          <div className="bar"><div className="fill" style={scoreStyle} /></div>
+          <p>{state?.score || 0}% score ({state?.confirmed || 0}/{state?.total || 0} indicators confirming)</p>
         </section>
       )}
 
@@ -111,9 +107,7 @@ export default function App() {
         <section className="card">
           <div className="tf-row">
             {tfs.map((tf) => (
-              <button key={tf} onClick={() => setChartTf(tf)} className={chartTf === tf ? "active" : ""}>
-                {tf}
-              </button>
+              <button key={tf} onClick={() => setChartTf(tf)} className={chartTf === tf ? "active" : ""}>{tf}</button>
             ))}
           </div>
           <div className="chart-wrap">
@@ -137,9 +131,7 @@ export default function App() {
               <h4>{group}</h4>
               <div className="chips">
                 {items.map((name) => (
-                  <span key={name} className={indicatorData?.active_indicators?.includes(name) ? "chip on" : "chip"}>
-                    {name}
-                  </span>
+                  <span key={name} className={indicatorData?.active_indicators?.includes(name) ? "chip on" : "chip"}>{name}</span>
                 ))}
               </div>
             </div>
@@ -154,9 +146,7 @@ export default function App() {
 
       <nav className="bottom-nav">
         {tabs.map((tab) => (
-          <button key={tab} onClick={() => setActiveTab(tab)} className={activeTab === tab ? "active" : ""}>
-            {tab}
-          </button>
+          <button key={tab} onClick={() => setActiveTab(tab)} className={activeTab === tab ? "active" : ""}>{tab}</button>
         ))}
       </nav>
       <Footer />
@@ -165,19 +155,15 @@ export default function App() {
 }
 
 function buildLinePath(values, width, height) {
-  if (!values.length) {
-    return "";
-  }
+  if (!values.length) return "";
   const min = Math.min(...values);
   const max = Math.max(...values);
   const spread = max - min || 1;
-  return values
-    .map((v, idx) => {
-      const x = (idx / (values.length - 1 || 1)) * width;
-      const y = height - ((v - min) / spread) * height;
-      return `${idx === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
+  return values.map((v, idx) => {
+    const x = (idx / (values.length - 1 || 1)) * width;
+    const y = height - ((v - min) / spread) * height;
+    return `${idx === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(" ");
 }
 
 function Footer() {

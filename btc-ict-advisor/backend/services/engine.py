@@ -30,9 +30,7 @@ ALL_INDICATORS = {
         "RSI", "RSI MTF", "MACD", "EMA20", "EMA50", "EMA200", "EMA Alignment", "Bollinger",
         "Stochastic RSI", "ATR", "ADX", "OBV", "Aroon",
     ],
-    "Volume & Order Flow": [
-        "Volume Spike", "VWAP", "Anchored VWAP", "Volume Profile", "CVD", "CVD Divergence",
-    ],
+    "Volume & Order Flow": ["Volume Spike", "VWAP", "Anchored VWAP", "Volume Profile", "CVD", "CVD Divergence"],
     "Derivatives": ["Open Interest", "Funding Rate", "Liquidation Heatmap"],
     "On-Chain / Macro": [
         "Fear & Greed", "BTC Dominance Proxy", "DXY Correlation", "NUPL Proxy", "MVRV Proxy", "Exchange Netflow",
@@ -65,25 +63,29 @@ class HistoryProgress:
 class AdvisorEngine:
     def __init__(self) -> None:
         self.candles: dict[str, list[list]] = {tf: [] for tf in TIMEFRAME_CONFIG}
-        self.progress: dict[str, HistoryProgress] = {}
+        self.progress: dict[str, HistoryProgress] = {
+            tf: HistoryProgress(tf, False, 0, f"Loading {tf.upper()}... ⏳") for tf in TIMEFRAME_CONFIG
+        }
         self.active_indicators = set(PRESETS["hugo_fx_ict"])
         self.min_score_threshold = 70
         self.signal_cooldown_hours = 4
         self.primary_timeframe = "1h"
         self.confirmation_timeframe = "4h"
         self._initialized = False
+        self._initializing = False
         self.connection_status = "OFFLINE"
 
     async def initialize(self) -> None:
-        if self._initialized:
+        if self._initialized or self._initializing:
             return
+        self._initializing = True
 
-        async with httpx.AsyncClient(timeout=25) as client:
+        async with httpx.AsyncClient(timeout=20) as client:
             for tf, cfg in TIMEFRAME_CONFIG.items():
                 try:
                     data = await self._load_paginated(client, cfg["interval"], cfg["days"])
                     source = "live"
-                except Exception as exc:  # network fallback
+                except Exception as exc:
                     logger.warning("Failed loading %s data: %s", tf, exc)
                     data = self._generate_mock_candles(cfg["interval"], cfg["target"])
                     source = "mock"
@@ -102,8 +104,9 @@ class AdvisorEngine:
                     message=f"Loading {tf.upper()}... ✅ ({len(data)} candles — {start} to {end}){suffix}",
                 )
 
-        self.connection_status = "ONLINE" if self.candles.get("1h") else "OFFLINE"
+        self.connection_status = "ONLINE" if any(self.candles.values()) else "OFFLINE"
         self._initialized = True
+        self._initializing = False
 
     async def _load_paginated(self, client: httpx.AsyncClient, interval: str, days: int) -> list[list]:
         start_ts = int((datetime.now(tz=timezone.utc) - timedelta(days=days)).timestamp() * 1000)
@@ -130,13 +133,7 @@ class AdvisorEngine:
         return [r for r in rows if r[0] >= start_ts]
 
     def _generate_mock_candles(self, interval: str, count: int) -> list[list]:
-        interval_minutes = {
-            "15m": 15,
-            "1h": 60,
-            "4h": 240,
-            "1d": 1440,
-            "1w": 10080,
-        }[interval]
+        interval_minutes = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}[interval]
         now = datetime.now(tz=timezone.utc)
         step = timedelta(minutes=interval_minutes)
         base = 45000.0
@@ -151,18 +148,8 @@ class AdvisorEngine:
             low_price = min(open_price, close_price) - random.uniform(10, 100)
             volume = random.uniform(50, 800)
             rows.append([
-                ts,
-                f"{open_price:.2f}",
-                f"{high_price:.2f}",
-                f"{low_price:.2f}",
-                f"{close_price:.2f}",
-                f"{volume:.2f}",
-                ts + int(step.total_seconds() * 1000) - 1,
-                "0",
-                0,
-                "0",
-                "0",
-                "0",
+                ts, f"{open_price:.2f}", f"{high_price:.2f}", f"{low_price:.2f}", f"{close_price:.2f}", f"{volume:.2f}",
+                ts + int(step.total_seconds() * 1000) - 1, "0", 0, "0", "0", "0",
             ])
         return rows
 
@@ -202,17 +189,15 @@ class AdvisorEngine:
             "daily_bias": "BULLISH",
             "kill_zone": self._kill_zone_status(),
             "connection_status": self.connection_status,
+            "loading": self._initializing and not self._initialized,
             "disclaimer": "Not financial advice — for informational purposes only",
         }
 
     def _signal_score(self) -> int:
-        if not self.active_indicators:
-            return 0
-        return 78
+        return 78 if self.active_indicators else 0
 
     def _kill_zone_status(self) -> str:
-        now = datetime.now(tz=timezone.utc)
-        h = now.hour
+        h = datetime.now(tz=timezone.utc).hour
         if 7 <= h < 10:
             return "ACTIVE (London)"
         if 13 <= h < 16:
@@ -221,39 +206,17 @@ class AdvisorEngine:
 
     async def chart_data(self, tf: str) -> dict:
         rows = self.candles[tf]
-        shaped = [
-            {
-                "time": r[0],
-                "open": float(r[1]),
-                "high": float(r[2]),
-                "low": float(r[3]),
-                "close": float(r[4]),
-                "volume": float(r[5]),
-            }
-            for r in rows
-        ]
+        shaped = [{"time": r[0], "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5])} for r in rows]
         label = "Showing 0 candles"
         if rows:
             start = datetime.fromtimestamp(rows[0][0] / 1000, tz=timezone.utc).strftime("%b %Y")
             end = datetime.fromtimestamp(rows[-1][0] / 1000, tz=timezone.utc).strftime("%b %Y")
             label = f"Showing {len(rows)} candles — {start} → {end}"
-        return {
-            "timeframe": tf,
-            "candles": shaped,
-            "zones": {"fvg": [], "ob": [], "liquidity": [], "structure": []},
-            "label": label,
-        }
+        return {"timeframe": tf, "candles": shaped, "zones": {"fvg": [], "ob": [], "liquidity": [], "structure": []}, "label": label}
 
     def session_info(self) -> dict:
         now = datetime.now(tz=timezone.utc)
-        return {
-            "utc": now.isoformat(),
-            "session": self._kill_zone_status(),
-            "pdh": None,
-            "pdl": None,
-            "pwh": None,
-            "pwl": None,
-        }
+        return {"utc": now.isoformat(), "session": self._kill_zone_status(), "pdh": None, "pdl": None, "pwh": None, "pwl": None}
 
     async def derivatives_state(self) -> dict:
         try:
@@ -272,31 +235,18 @@ class AdvisorEngine:
             async with httpx.AsyncClient(timeout=12) as client:
                 fng = await client.get(FNG_URL)
                 fng.raise_for_status()
-                return {
-                    "fear_and_greed": fng.json().get("data", [{}])[0],
-                    "nupl_proxy": "neutral",
-                    "mvrv_proxy": "moderately overvalued",
-                }
+                return {"fear_and_greed": fng.json().get("data", [{}])[0], "nupl_proxy": "neutral", "mvrv_proxy": "moderately overvalued"}
         except Exception:
-            return {
-                "fear_and_greed": {"value": "50", "value_classification": "Neutral"},
-                "nupl_proxy": "neutral",
-                "mvrv_proxy": "unknown",
-            }
+            return {"fear_and_greed": {"value": "50", "value_classification": "Neutral"}, "nupl_proxy": "neutral", "mvrv_proxy": "unknown"}
 
     async def backtest_summary(self) -> dict:
-        return {
-            "range": "last 1 year",
-            "signals": 120,
-            "win_rate": 54.1,
-            "avg_rr": 2.2,
-            "max_drawdown": 14.8,
-        }
+        return {"range": "last 1 year", "signals": 120, "win_rate": 54.1, "avg_rr": 2.2, "max_drawdown": 14.8}
 
     def history_status(self) -> dict:
-        all_ready = self._initialized and len(self.progress) == len(TIMEFRAME_CONFIG)
+        all_ready = self._initialized and all(p.done for p in self.progress.values())
+        ordered = ["1w", "1d", "4h", "1h", "15m"]
         return {
-            "items": [vars(self.progress[k]) for k in ["1w", "1d", "4h", "1h", "15m"] if k in self.progress],
+            "items": [vars(self.progress[k]) for k in ordered if k in self.progress],
             "all_data_ready": all_ready,
-            "message": "All data ready ✅" if all_ready else "Loading...",
+            "message": "All data ready ✅" if all_ready else "Loading history in background...",
         }

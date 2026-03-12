@@ -22,11 +22,13 @@ Mobile-first BTC analysis dashboard using HugoFX ICT/SMC method.
 - `GET /api/backtest`
 - `GET /api/history/status`
 
-## Troubleshooting
-- If Binance/Fear&Greed APIs are unreachable, backend now generates fallback candles so the app still shows chart data.
-- In UI header:
-  - `API: ONLINE/OFFLINE` = frontend can/cannot reach backend.
-  - `Feed: ONLINE/OFFLINE` = backend data feed status.
-- Make sure the project path is exactly `D:\btc-ict-advisor` when using the provided `.bat` scripts.
+## Troubleshooting (offline / no chart)
+1. Verify backend is reachable:
+   - Open `http://localhost:8001/api/state`
+   - Open `http://localhost:8001/api/history/status`
+2. If backend is not reachable, re-run `install.bat` (Python 3.11 required).
+3. The backend now starts instantly and loads history in background; during loading, frontend stays online and shows progress.
+4. If Binance/Fear&Greed are blocked, backend auto-generates fallback candles so chart still appears.
+5. Frontend API host is auto-detected from current hostname (`http://<host>:8001`).
 
 > Not financial advice — for informational purposes only.
