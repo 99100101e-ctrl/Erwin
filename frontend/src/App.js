@@ -29,14 +29,22 @@ function sendNotification(title, body) {
   } catch {}
 }
 
+const SIGNAL_STRONG = new Set(['STRONG_BUY', 'STRONG_SELL', 'MODERATE_BUY', 'MODERATE_SELL']);
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('live');
+  const [signalBadge, setSignalBadge] = useState(false);
   const { data, wsConnected, priceDirection } = useWebSocket();
 
   // Notification state tracking
   const prevSignalLabel = useRef(null);
   const alertAboveFired = useRef(false);
   const alertBelowFired = useRef(false);
+
+  // Clear badge when user navigates to live tab
+  useEffect(() => {
+    if (activeTab === 'live') setSignalBadge(false);
+  }, [activeTab]);
 
   // Fire notifications on signal changes + price alerts
   useEffect(() => {
@@ -46,20 +54,21 @@ export default function App() {
     const signal = data.signal || {};
     const price = data.price;
 
-    // Signal notifications
-    if (settings.notifySignals && signal.signal) {
+    // Signal notifications + badge
+    if (signal.signal) {
       const label = signal.signal;
-      if (
-        label !== prevSignalLabel.current &&
-        (label === 'STRONG_BUY' || label === 'STRONG_SELL' ||
-         label === 'MODERATE_BUY' || label === 'MODERATE_SELL')
-      ) {
-        const isBuy = label.includes('BUY');
-        const strength = label.startsWith('STRONG') ? 'Strong' : 'Moderate';
-        sendNotification(
-          `${strength} ${isBuy ? 'BUY' : 'SELL'} Signal`,
-          `BTC/USD — Score ${signal.score ?? '?'}/100${price ? ` @ $${Math.round(price).toLocaleString()}` : ''}`
-        );
+      if (label !== prevSignalLabel.current && SIGNAL_STRONG.has(label)) {
+        // Set badge on Live tab if user is on another tab
+        if (activeTab !== 'live') setSignalBadge(true);
+
+        if (settings.notifySignals) {
+          const isBuy = label.includes('BUY');
+          const strength = label.startsWith('STRONG') ? 'Strong' : 'Moderate';
+          sendNotification(
+            `${strength} ${isBuy ? 'BUY' : 'SELL'} Signal`,
+            `BTC/USD — Score ${signal.score ?? '?'}/100${price ? ` @ $${Math.round(price).toLocaleString()}` : ''}`
+          );
+        }
       }
       prevSignalLabel.current = label;
     }
@@ -89,7 +98,7 @@ export default function App() {
       // Reset below alert if price rises back 0.5% above threshold
       if (below && price > below * 1.005) alertBelowFired.current = false;
     }
-  }, [data.signal, data.price]);
+  }, [data.signal, data.price, activeTab]);
 
   const isExtreme = data.volatilityLevel === 'Extreme';
 
@@ -135,13 +144,18 @@ export default function App() {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex-1 flex flex-col items-center py-2 text-xs transition-colors ${
+              className={`flex-1 flex flex-col items-center py-2 text-xs transition-colors relative ${
                 activeTab === tab.id
                   ? 'text-[#F7931A]'
                   : 'text-gray-500 hover:text-gray-300'
               }`}
             >
-              <span className="text-lg leading-none mb-0.5">{tab.icon}</span>
+              <span className="relative text-lg leading-none mb-0.5">
+                {tab.icon}
+                {tab.id === 'live' && signalBadge && activeTab !== 'live' && (
+                  <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-[#F7931A] animate-pulse" />
+                )}
+              </span>
               <span>{tab.label}</span>
               {activeTab === tab.id && (
                 <span className="absolute bottom-[calc(env(safe-area-inset-bottom)+40px)] w-8 h-0.5 bg-[#F7931A] rounded-full" />
