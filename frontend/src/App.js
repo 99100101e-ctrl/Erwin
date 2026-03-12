@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useWebSocket } from './hooks/useWebSocket';
 import LiveTab from './components/LiveTab';
 import ChartTab from './components/ChartTab';
@@ -14,9 +14,82 @@ const TABS = [
   { id: 'settings', label: 'Settings', icon: '⚙️' },
 ];
 
+function loadSettings() {
+  try {
+    return JSON.parse(localStorage.getItem('btc-advisor-settings') || 'null') || {};
+  } catch {
+    return {};
+  }
+}
+
+function sendNotification(title, body) {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  try {
+    new Notification(title, { body, icon: '/favicon.ico' });
+  } catch {}
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('live');
   const { data, wsConnected, priceDirection } = useWebSocket();
+
+  // Notification state tracking
+  const prevSignalLabel = useRef(null);
+  const alertAboveFired = useRef(false);
+  const alertBelowFired = useRef(false);
+
+  // Fire notifications on signal changes + price alerts
+  useEffect(() => {
+    const settings = loadSettings();
+    if (!settings.notifications) return;
+
+    const signal = data.signal || {};
+    const price = data.price;
+
+    // Signal notifications
+    if (settings.notifySignals && signal.signal) {
+      const label = signal.signal;
+      if (
+        label !== prevSignalLabel.current &&
+        (label === 'STRONG_BUY' || label === 'STRONG_SELL' ||
+         label === 'MODERATE_BUY' || label === 'MODERATE_SELL')
+      ) {
+        const isBuy = label.includes('BUY');
+        const strength = label.startsWith('STRONG') ? 'Strong' : 'Moderate';
+        sendNotification(
+          `${strength} ${isBuy ? 'BUY' : 'SELL'} Signal`,
+          `BTC/USD — Score ${signal.score ?? '?'}/100${price ? ` @ $${Math.round(price).toLocaleString()}` : ''}`
+        );
+      }
+      prevSignalLabel.current = label;
+    }
+
+    // Price alert notifications
+    if (settings.notifyPriceAlerts && price) {
+      const above = parseFloat(settings.priceAlertAbove);
+      const below = parseFloat(settings.priceAlertBelow);
+
+      if (above && price >= above && !alertAboveFired.current) {
+        alertAboveFired.current = true;
+        sendNotification(
+          'Price Alert — Target Reached',
+          `BTC crossed ABOVE $${above.toLocaleString()} — now at $${Math.round(price).toLocaleString()}`
+        );
+      }
+      // Reset above alert if price drops back 0.5% below threshold
+      if (above && price < above * 0.995) alertAboveFired.current = false;
+
+      if (below && price <= below && !alertBelowFired.current) {
+        alertBelowFired.current = true;
+        sendNotification(
+          'Price Alert — Level Breached',
+          `BTC dropped BELOW $${below.toLocaleString()} — now at $${Math.round(price).toLocaleString()}`
+        );
+      }
+      // Reset below alert if price rises back 0.5% above threshold
+      if (below && price > below * 1.005) alertBelowFired.current = false;
+    }
+  }, [data.signal, data.price]);
 
   const isExtreme = data.volatilityLevel === 'Extreme';
 

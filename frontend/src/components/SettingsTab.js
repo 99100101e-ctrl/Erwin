@@ -5,6 +5,10 @@ const DEFAULT_SETTINGS = {
   riskPct: 2,
   currency: 'USD',
   notifications: false,
+  notifySignals: true,
+  notifyPriceAlerts: true,
+  priceAlertAbove: '',
+  priceAlertBelow: '',
   theme: 'dark',
 };
 
@@ -16,12 +20,15 @@ function fmt(n, d = 0) {
 export default function SettingsTab({ data }) {
   const [settings, setSettings] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem('btc-advisor-settings') || 'null') || DEFAULT_SETTINGS;
+      return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem('btc-advisor-settings') || 'null') };
     } catch {
       return DEFAULT_SETTINGS;
     }
   });
   const [pnl, setPnl] = useState({ trades: [], total: 0 });
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
+  );
 
   // Load P&L from localStorage
   useEffect(() => {
@@ -37,6 +44,24 @@ export default function SettingsTab({ data }) {
     localStorage.setItem('btc-advisor-settings', JSON.stringify(newSettings));
   };
 
+  const handleNotifToggle = async () => {
+    if (typeof Notification === 'undefined') return;
+    if (!settings.notifications) {
+      // Enabling — request permission
+      const perm = await Notification.requestPermission();
+      setNotifPermission(perm);
+      if (perm === 'granted') {
+        save({ ...settings, notifications: true });
+        new Notification('BTC Advisor', {
+          body: 'Notifications enabled! You will be alerted on strong signals and price alerts.',
+          icon: '/favicon.ico',
+        });
+      }
+    } else {
+      save({ ...settings, notifications: false });
+    }
+  };
+
   const positionSize = (settings.portfolioSize * (settings.riskPct / 100)).toFixed(2);
   const signal = data.signal || {};
 
@@ -47,9 +72,119 @@ export default function SettingsTab({ data }) {
     ? Math.floor(parseFloat(positionSize) / riskAmt)
     : null;
 
+  const notifSupported = typeof Notification !== 'undefined' && notifPermission !== 'unsupported';
+  const notifBlocked = notifPermission === 'denied';
+
   return (
     <div className="px-4 pt-4 pb-6 max-w-lg mx-auto space-y-4">
       <h2 className="text-lg font-bold">Settings & Portfolio</h2>
+
+      {/* Notifications */}
+      <div className="glass-card p-4 space-y-3">
+        <div className="text-sm font-semibold text-gray-300 mb-1">Notifications</div>
+
+        {!notifSupported && (
+          <div className="text-xs text-red-400 bg-red-900/30 rounded p-2">
+            Browser notifications are not supported on this device/browser.
+          </div>
+        )}
+        {notifBlocked && (
+          <div className="text-xs text-yellow-400 bg-yellow-900/30 rounded p-2">
+            Notifications are blocked. Enable them in your browser settings, then toggle again.
+          </div>
+        )}
+
+        {notifSupported && (
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm text-gray-300">Enable Notifications</div>
+              <div className="text-xs text-gray-500">
+                {settings.notifications ? 'Active — alerts will fire' : 'Off'}
+              </div>
+            </div>
+            <button
+              onClick={handleNotifToggle}
+              disabled={notifBlocked}
+              className={`relative w-11 h-6 rounded-full transition-colors ${
+                settings.notifications ? 'bg-[#F7931A]' : 'bg-gray-700'
+              } ${notifBlocked ? 'opacity-40 cursor-not-allowed' : ''}`}
+            >
+              <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                settings.notifications ? 'translate-x-5' : 'translate-x-0.5'
+              }`} />
+            </button>
+          </div>
+        )}
+
+        {settings.notifications && (
+          <>
+            <div className="border-t border-gray-700 pt-3 space-y-2">
+              <div className="text-xs text-gray-400 font-semibold uppercase tracking-wide mb-2">Alert Types</div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.notifySignals}
+                  onChange={e => save({ ...settings, notifySignals: e.target.checked })}
+                  className="accent-[#F7931A]"
+                />
+                <span className="text-sm text-gray-300">Strong signals (BUY / SELL)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.notifyPriceAlerts}
+                  onChange={e => save({ ...settings, notifyPriceAlerts: e.target.checked })}
+                  className="accent-[#F7931A]"
+                />
+                <span className="text-sm text-gray-300">Price level alerts</span>
+              </label>
+            </div>
+
+            {settings.notifyPriceAlerts && (
+              <div className="border-t border-gray-700 pt-3 space-y-3">
+                <div className="text-xs text-gray-400 font-semibold uppercase tracking-wide mb-1">Price Alerts</div>
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Alert when price goes ABOVE ($)</label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 105000"
+                    value={settings.priceAlertAbove}
+                    onChange={e => save({ ...settings, priceAlertAbove: e.target.value })}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Alert when price goes BELOW ($)</label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 90000"
+                    value={settings.priceAlertBelow}
+                    onChange={e => save({ ...settings, priceAlertBelow: e.target.value })}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+                  />
+                </div>
+                {(settings.priceAlertAbove || settings.priceAlertBelow) && data.price && (
+                  <div className="text-xs text-gray-500">
+                    Current price: ${fmt(data.price)}
+                    {settings.priceAlertAbove && (
+                      <span className={parseFloat(settings.priceAlertAbove) <= data.price ? ' text-red-400' : ' text-gray-500'}>
+                        {' '}• Above ${fmt(parseFloat(settings.priceAlertAbove))}
+                        {parseFloat(settings.priceAlertAbove) <= data.price ? ' ⚠️ Already triggered' : ''}
+                      </span>
+                    )}
+                    {settings.priceAlertBelow && (
+                      <span className={parseFloat(settings.priceAlertBelow) >= data.price ? ' text-red-400' : ' text-gray-500'}>
+                        {' '}• Below ${fmt(parseFloat(settings.priceAlertBelow))}
+                        {parseFloat(settings.priceAlertBelow) >= data.price ? ' ⚠️ Already triggered' : ''}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {/* Portfolio settings */}
       <div className="glass-card p-4 space-y-4">
