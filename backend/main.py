@@ -45,9 +45,11 @@ class CandleStore:
     def __init__(self):
         self.candles_1h: deque = deque(maxlen=MAX_CANDLES)
         self.candles_4h: deque = deque(maxlen=MAX_CANDLES)
+        self.candles_1d: deque = deque(maxlen=MAX_CANDLES)
         # Each candle: {ts, open, high, low, close, volume}
         self._current_1h: Optional[Dict] = None
         self._current_4h: Optional[Dict] = None
+        self._current_1d: Optional[Dict] = None
 
     def update_from_kline(self, candle_data: Dict, interval_sec: int):
         """Process a kline update. Prices are already in USD (no conversion needed)."""
@@ -72,6 +74,10 @@ class CandleStore:
             if is_closed:
                 self.candles_4h.append(candle)
             self._current_4h = candle
+        elif interval_sec == 86400:
+            if is_closed:
+                self.candles_1d.append(candle)
+            self._current_1d = candle
 
     def get_lists(self):
         """Return OHLCV lists for 1h and 4h, plus 1h timestamps."""
@@ -171,6 +177,27 @@ async def seed_historical_data():
                                 "open": o, "high": h, "low": l, "close": c, "volume": v,
                             })
                 log.info(f"Binance REST: seeded {len(candle_store.candles_4h)} 4h candles")
+
+                # 1d candles
+                try:
+                    resp1d = await client.get(
+                        "https://api.binance.com/api/v3/klines",
+                        params={"symbol": "BTCUSDT", "interval": "1d", "limit": 200},
+                    )
+                    rows1d = resp1d.json()
+                    for row in rows1d:
+                        if len(row) >= 6:
+                            ts_ms = row[0]
+                            o, h, l, c, v = float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])
+                            if c > 1000:
+                                candle_store.candles_1d.append({
+                                    "ts": ts_ms // 1000,
+                                    "open": o, "high": h, "low": l, "close": c, "volume": v,
+                                })
+                    log.info(f"Binance REST: seeded {len(candle_store.candles_1d)} 1d candles")
+                except Exception as e_1d:
+                    log.warning(f"1d candle seed failed: {e_1d}")
+
                 log.info("Binance historical data ready — calculating initial indicators")
                 await update_indicators_and_signal()
                 return
@@ -296,7 +323,7 @@ async def broadcast(message: Dict):
 
 BINANCE_WS_URL = (
     "wss://stream.binance.com:9443/stream"
-    "?streams=btcusdt@ticker/btcusdt@kline_1h/btcusdt@kline_4h"
+    "?streams=btcusdt@ticker/btcusdt@kline_1h/btcusdt@kline_4h/btcusdt@kline_1d"
 )
 
 
@@ -360,6 +387,8 @@ async def handle_binance_message(msg: Dict):
             interval_sec = 3600
         elif interval == "4h":
             interval_sec = 14400
+        elif interval == "1d":
+            interval_sec = 86400
         else:
             return
 
@@ -406,6 +435,18 @@ async def update_indicators_and_signal():
         state["trend_1h"] = _assess_trend(emas_1h, closes_1h[-1] if closes_1h else None)
         state["trend_4h"] = _assess_trend(emas_4h, closes_4h[-1] if closes_4h else None)
         state["market_phase"] = indicators.get("market_phase", "Unknown")
+
+        # 1D trend from real daily candles
+        closes_1d = [c["close"] for c in candle_store.candles_1d]
+        if candle_store._current_1d:
+            closes_1d = closes_1d + [candle_store._current_1d["close"]]
+        if len(closes_1d) >= 50:
+            emas_1d = {
+                "ema20": _ema_last(closes_1d, 20),
+                "ema50": _ema_last(closes_1d, 50),
+                "ema200": _ema_last(closes_1d, 200) if len(closes_1d) >= 200 else None,
+            }
+            state["trend_1d"] = _assess_trend(emas_1d, closes_1d[-1])
 
         # 15m trend: compare last close vs 4-bar-ago close (approximate)
         if len(closes_1h) >= 5:
@@ -463,6 +504,17 @@ async def update_indicators_and_signal():
 
     except Exception as e:
         log.error(f"Indicator calculation error: {e}", exc_info=True)
+
+
+def _ema_last(prices: list, period: int) -> Optional[float]:
+    """Compute the last EMA value for a price series."""
+    if len(prices) < period:
+        return None
+    k = 2.0 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for p in prices[period:]:
+        ema = p * k + ema * (1 - k)
+    return ema
 
 
 def _assess_trend(emas: Dict, price: Optional[float]) -> str:
