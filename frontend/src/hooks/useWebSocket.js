@@ -52,14 +52,16 @@ export function useWebSocket() {
 
           setData({
             price: newPrice,
-            change24h: s.price_change_24h ?? null,   // e.g. -0.012 = -1.2%
+            change24h: s.price_change_24h ?? null,
             volume24h: s.volume_24h ?? null,
             indicators: s.indicators || {},
             signal: s.signal || {},
             fearGreed: s.fear_greed || null,
             marketPhase: s.market_phase || 'Unknown',
+            trend15m: s.trend_15m || 'Neutral',
             trend1h: s.trend_1h || 'Neutral',
             trend4h: s.trend_4h || 'Neutral',
+            trend1d: s.trend_1d || 'Neutral',
             volatilityLevel: s.volatility_level || 'Low',
             signalHistory: s.signal_history || [],
             candles1h: s.candles_1h || [],

@@ -74,7 +74,7 @@ class CandleStore:
             self._current_4h = candle
 
     def get_lists(self):
-        """Return (closes_1h, highs_1h, lows_1h, vols_1h, closes_4h, ...) as lists."""
+        """Return OHLCV lists for 1h and 4h, plus 1h timestamps."""
         c1 = list(self.candles_1h)
         c4 = list(self.candles_4h)
         if self._current_1h:
@@ -94,6 +94,7 @@ class CandleStore:
             extract(c4, "high"),
             extract(c4, "low"),
             extract(c4, "volume"),
+            extract(c1, "ts"),   # timestamps_1h for FVG detection
         )
 
 
@@ -112,6 +113,7 @@ state: Dict = {
     "trend_1h": "Neutral",
     "trend_4h": "Neutral",
     "trend_1d": "Neutral",
+    "trend_15m": "Neutral",
     "volatility_level": "Low",
     "signal_history": [],
     "candles_1h": [],
@@ -384,6 +386,7 @@ async def update_indicators_and_signal():
     (
         closes_1h, highs_1h, lows_1h, vols_1h,
         closes_4h, highs_4h, lows_4h, vols_4h,
+        timestamps_1h,
     ) = candle_store.get_lists()
 
     if len(closes_1h) < 30:
@@ -394,6 +397,7 @@ async def update_indicators_and_signal():
         indicators = calculate_all_indicators(
             closes_1h, highs_1h, lows_1h, vols_1h,
             closes_4h, highs_4h, lows_4h, vols_4h,
+            timestamps_1h=timestamps_1h,
         )
         state["indicators"] = indicators
 
@@ -402,6 +406,10 @@ async def update_indicators_and_signal():
         state["trend_1h"] = _assess_trend(emas_1h, closes_1h[-1] if closes_1h else None)
         state["trend_4h"] = _assess_trend(emas_4h, closes_4h[-1] if closes_4h else None)
         state["market_phase"] = indicators.get("market_phase", "Unknown")
+
+        # 15m trend: compare last close vs 4-bar-ago close (approximate)
+        if len(closes_1h) >= 5:
+            state["trend_15m"] = "Bullish" if closes_1h[-1] > closes_1h[-5] else "Bearish"
 
         atr_pct = indicators.get("atr_pct")
         if atr_pct is None or atr_pct < 1.0:
@@ -427,9 +435,12 @@ async def update_indicators_and_signal():
         state["last_update"] = datetime.now(timezone.utc).isoformat()
 
         price_str = f"{price:.0f}" if price else "N/A"
+        adx_val = (indicators.get("adx_1h") or {}).get("adx")
+        sweep = indicators.get("sweep_1h", {})
         log.info(
             f"Indicators updated — price={price_str}, "
             f"1h={len(closes_1h)}, 4h={len(closes_4h)}, "
+            f"ADX={adx_val}, sweep={sweep.get('direction')}, "
             f"trend={state['trend_1h']}, phase={state['market_phase']}"
         )
 
@@ -439,8 +450,10 @@ async def update_indicators_and_signal():
             "indicators": _serialize_indicators(indicators),
             "signal": signal,
             "market_phase": state["market_phase"],
+            "trend_15m": state["trend_15m"],
             "trend_1h": state["trend_1h"],
             "trend_4h": state["trend_4h"],
+            "trend_1d": state.get("trend_1d", "Neutral"),
             "volatility_level": state["volatility_level"],
             "signal_history": state["signal_history"],
             "candles_1h": state["candles_1h"],
@@ -518,8 +531,10 @@ async def get_state():
         "signal": state.get("signal", {}),
         "fear_greed": state.get("fear_greed"),
         "market_phase": state.get("market_phase", "Unknown"),
+        "trend_15m": state.get("trend_15m", "Neutral"),
         "trend_1h": state.get("trend_1h", "Neutral"),
         "trend_4h": state.get("trend_4h", "Neutral"),
+        "trend_1d": state.get("trend_1d", "Neutral"),
         "volatility_level": state.get("volatility_level", "Low"),
         "signal_history": state.get("signal_history", []),
         "candles_1h": state.get("candles_1h", []),

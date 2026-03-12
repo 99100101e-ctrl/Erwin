@@ -22,6 +22,18 @@ function IndicatorPill({ label, value, color = 'text-gray-300' }) {
   );
 }
 
+function TrendDot({ label, trend }) {
+  const isBull = trend === 'Bullish' || trend === 'Mildly Bullish';
+  const isBear = trend === 'Bearish' || trend === 'Mildly Bearish';
+  const dot = isBull ? '🟢' : isBear ? '🔴' : '⚪';
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <span className="text-[10px] text-gray-500 uppercase">{label}</span>
+      <span className="text-lg leading-none">{dot}</span>
+    </div>
+  );
+}
+
 function TrendBadge({ label, trend }) {
   const color =
     trend === 'Bullish' || trend === 'Mildly Bullish'
@@ -37,7 +49,8 @@ function TrendBadge({ label, trend }) {
 }
 
 export default function LiveTab({ data, priceDirection }) {
-  const { price, change24h, indicators, signal, fearGreed, marketPhase, trend1h, trend4h, volatilityLevel } = data;
+  const { price, change24h, indicators, signal, fearGreed, marketPhase,
+          trend15m, trend1h, trend4h, trend1d, volatilityLevel } = data;
 
   const ind = indicators || {};
   const rsi1h = ind.rsi_1h;
@@ -48,6 +61,10 @@ export default function LiveTab({ data, priceDirection }) {
   const stoch = ind.stoch_rsi_1h;
   const atrPct = ind.atr_pct;
   const volRatio = ind.volume_ratio_1h;
+  const adx = ind.adx_1h;
+  const sweep = ind.sweep_1h;
+  const poc = ind.poc_1h;
+  const liqZone = ind.liq_zone_1h;
 
   const priceClass = priceDirection === 'up' ? 'price-up' : priceDirection === 'down' ? 'price-down' : 'text-white';
 
@@ -89,7 +106,58 @@ export default function LiveTab({ data, priceDirection }) {
         </div>
       </div>
 
-      {/* Trend badges */}
+      {/* MTF Scanner */}
+      <div className="glass-card p-3">
+        <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Multi-Timeframe Scanner</div>
+        <div className="grid grid-cols-4 gap-2">
+          <TrendDot label="15M" trend={trend15m} />
+          <TrendDot label="1H"  trend={trend1h} />
+          <TrendDot label="4H"  trend={trend4h} />
+          <TrendDot label="1D"  trend={trend1d} />
+        </div>
+      </div>
+
+      {/* Liquidity sweep alert */}
+      {sweep?.detected && (
+        <div className={`glass-card p-3 flex items-center gap-3 ${
+          sweep.direction === 'bullish'
+            ? 'border border-green-700 bg-green-900/20'
+            : 'border border-red-700 bg-red-900/20'
+        }`}>
+          <span className="text-2xl">{sweep.direction === 'bullish' ? '💎' : '🔻'}</span>
+          <div>
+            <div className={`text-sm font-bold ${sweep.direction === 'bullish' ? 'text-green-400' : 'text-red-400'}`}>
+              Liquidity Sweep Detected!
+            </div>
+            <div className="text-xs text-gray-400">
+              {sweep.direction === 'bullish' ? 'Sell-side liquidity taken' : 'Buy-side liquidity taken'} at ${fmt(sweep.level)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* POC & Liquidation zone quick info */}
+      {(poc || liqZone) && (
+        <div className="flex gap-2">
+          {poc && (
+            <div className="glass-card px-3 py-2 flex-1 text-center">
+              <div className="text-[10px] text-yellow-400 uppercase tracking-wide">POC</div>
+              <div className="text-sm font-bold text-yellow-300">${fmt(poc)}</div>
+            </div>
+          )}
+          {liqZone && (
+            <div className={`glass-card px-3 py-2 flex-1 text-center ${liqZone.near ? 'border border-red-700' : ''}`}>
+              <div className="text-[10px] text-red-400 uppercase tracking-wide">
+                {liqZone.near ? '⚠️ Liq Zone' : 'Liq Zone'}
+              </div>
+              <div className="text-sm font-bold text-red-300">${fmt(liqZone.zone)}</div>
+              <div className="text-[10px] text-gray-500">{liqZone.proximity_pct?.toFixed(1)}% away</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Trend badges (detailed) */}
       <div className="flex gap-2 flex-wrap">
         <TrendBadge label="1H" trend={trend1h} />
         <TrendBadge label="4H" trend={trend4h} />
@@ -215,6 +283,21 @@ export default function LiveTab({ data, priceDirection }) {
         <IndicatorPill label="EMA20" value={emas1h.ema20 ? fmt(emas1h.ema20) : '—'} />
         <IndicatorPill label="EMA50" value={emas1h.ema50 ? fmt(emas1h.ema50) : '—'} />
         <IndicatorPill label="EMA200" value={emas1h.ema200 ? fmt(emas1h.ema200) : '—'} />
+        <IndicatorPill
+          label="ADX"
+          value={adx?.adx != null ? adx.adx.toFixed(1) : '—'}
+          color={adx?.trending ? 'text-green-400' : 'text-gray-300'}
+        />
+        <IndicatorPill
+          label="DI+"
+          value={adx?.plus_di != null ? adx.plus_di.toFixed(1) : '—'}
+          color="text-green-300"
+        />
+        <IndicatorPill
+          label="DI-"
+          value={adx?.minus_di != null ? adx.minus_di.toFixed(1) : '—'}
+          color="text-red-300"
+        />
         {bb1h && (
           <>
             <IndicatorPill label="BB Upper" value={fmt(bb1h.upper)} color="text-red-300" />

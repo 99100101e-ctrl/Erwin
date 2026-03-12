@@ -69,8 +69,17 @@ class SignalEngine:
         # ATR extreme volatility suppression (still calculate but warn)
         volatility_extreme = atr_pct is not None and atr_pct > 2.5
 
+        # Titan-style bonus: liquidity sweep adds +10 to the dominant direction
+        sweep = indicators.get("sweep_1h") or {}
+        if sweep.get("detected"):
+            sweep_dir = sweep.get("direction")
+            if (direction == "BUY" and sweep_dir == "bullish") or \
+               (direction == "SELL" and sweep_dir == "bearish"):
+                score = min(100, score + 10)
+                conditions_met = conditions_met + [f"💎 Liquidity sweep ({sweep_dir})"]
+
         # Determine signal type
-        if score == 100:
+        if score >= 100:
             raw_signal = f"STRONG_{direction}"
         elif score >= 60:
             raw_signal = f"MODERATE_{direction}"
@@ -259,6 +268,15 @@ class SignalEngine:
         else:
             failed.append(cond)
 
+        # 8b. ADX trending (bonus condition — raises score without requiring it)
+        adx_data = ind.get("adx_1h") or {}
+        cond = "ADX > 25 (trending market)"
+        if adx_data.get("trending") and adx_data.get("plus_di", 0) > adx_data.get("minus_di", 0):
+            met.append(cond)
+        else:
+            v = f"{adx_data.get('adx', 'N/A')}"
+            failed.append(f"{cond} [ADX={v}]")
+
         # 9 & 10 are handled at signal level (consecutive, ATR)
         # Add them as auto conditions for scoring
         cond = "2 consecutive confirmations"
@@ -358,6 +376,15 @@ class SignalEngine:
             met.append(cond)
         else:
             failed.append(cond)
+
+        # 8b. ADX trending bearish
+        adx_data = ind.get("adx_1h") or {}
+        cond = "ADX > 25 (trending market)"
+        if adx_data.get("trending") and adx_data.get("minus_di", 0) > adx_data.get("plus_di", 0):
+            met.append(cond)
+        else:
+            v = f"{adx_data.get('adx', 'N/A')}"
+            failed.append(f"{cond} [ADX={v}]")
 
         # 9. Consecutive
         cond = "2 consecutive confirmations"
