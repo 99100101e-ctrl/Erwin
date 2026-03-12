@@ -28,7 +28,7 @@ Mobile-first BTC analysis dashboard using HugoFX ICT/SMC method.
    - `http://localhost:8001/health`
    - `http://localhost:8001/api/state`
 2. Frontend now tries multiple backend URLs automatically:
-   - `http://<host>:8001` then `http://<host>:8000`, then localhost fallbacks.
+   - `http://<host>:8001`, then `http://localhost:8001`.
 3. If backend is not reachable, re-run `install.bat` (Python 3.11 required).
 4. Backend starts immediately and loads history in background; during loading, frontend stays active and shows progress.
 5. If Binance/Fear&Greed are blocked, backend auto-generates fallback candles so chart still appears.

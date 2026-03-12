@@ -5,9 +5,7 @@ const host = window.location.hostname || "localhost";
 const API_CANDIDATES = [
   process.env.REACT_APP_API_URL,
   `http://${host}:8001`,
-  `http://${host}:8000`,
   "http://localhost:8001",
-  "http://localhost:8000",
 ].filter(Boolean);
 
 const tabs = ["LIVE", "CHART", "SIGNAL", "SESSIONS", "BACKTEST", "SETTINGS"];
