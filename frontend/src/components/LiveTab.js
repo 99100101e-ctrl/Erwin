@@ -170,18 +170,34 @@ export default function LiveTab({ data, priceDirection }) {
             <span className="text-2xl">{signalLabel.emoji}</span>
             <div>
               <div className="text-lg font-black">{signalLabel.text}</div>
-              <div className="text-xs text-gray-400">
-                Confidence: <span className="text-white font-semibold">{signal?.confidence || 'Low'}</span>
+              <div className="flex gap-2 items-center mt-0.5">
+                <span className="text-xs text-gray-400">
+                  Conf: <span className="text-white font-semibold">{signal?.confidence || 'Low'}</span>
+                </span>
+                {signal?.approach && signal.approach !== 'weak' && (
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                    signal.approach === 'strong'      ? 'bg-green-900 text-green-300' :
+                    signal.approach === 'approaching' ? 'bg-yellow-900 text-yellow-300' :
+                                                        'bg-gray-800 text-gray-400'
+                  }`}>
+                    {signal.approach === 'strong' ? '🔥 STRONG' :
+                     signal.approach === 'approaching' ? '⚡ APPROACHING' : '📈 BUILDING'}
+                  </span>
+                )}
               </div>
             </div>
           </div>
           <SignalGauge score={signal?.score || 0} />
         </div>
 
-        {/* Score bar */}
+        {/* Score bar — always visible */}
         <div className="mb-3">
           <div className="flex justify-between text-xs text-gray-400 mb-1">
-            <span>Signal Score</span>
+            <span>
+              {signal?.conditions_met?.length > 0
+                ? `${signal.conditions_met.length}/${signal.conditions_total || 10} conditions`
+                : 'Signal Score'}
+            </span>
             <span className="font-bold text-white">{signal?.score || 0}/100</span>
           </div>
           <div className="h-3 bg-gray-800 rounded-full overflow-hidden">
@@ -189,17 +205,25 @@ export default function LiveTab({ data, priceDirection }) {
               className={`h-full rounded-full score-bar ${
                 (signal?.score || 0) >= 80 ? 'bg-gradient-to-r from-green-600 to-green-400' :
                 (signal?.score || 0) >= 60 ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' :
-                'bg-gradient-to-r from-gray-600 to-gray-400'
+                (signal?.score || 0) >= 40 ? 'bg-gradient-to-r from-orange-700 to-orange-500' :
+                'bg-gradient-to-r from-gray-700 to-gray-500'
               }`}
               style={{ width: `${signal?.score || 0}%` }}
             />
           </div>
+          {/* Thresholds markers */}
+          <div className="relative h-1 mt-0.5">
+            <div className="absolute left-[60%] top-0 w-px h-2 bg-yellow-600/50" />
+            <div className="absolute left-[80%] top-0 w-px h-2 bg-green-600/50" />
+          </div>
         </div>
 
-        {/* Suppressed reason */}
-        {signal?.suppressed && signal?.suppress_reason && (
-          <div className="bg-gray-900 rounded p-2 text-xs text-yellow-400 mt-1">
-            ⏸ {signal.suppress_reason}
+        {/* Suppression reasons */}
+        {signal?.suppressed && signal?.suppress_reasons?.length > 0 && (
+          <div className="bg-gray-900 rounded p-2 mb-2 space-y-0.5">
+            {signal.suppress_reasons.map((r, i) => (
+              <div key={i} className="text-xs text-yellow-400">⏸ {r}</div>
+            ))}
           </div>
         )}
 
