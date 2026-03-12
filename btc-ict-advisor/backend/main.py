@@ -71,3 +71,8 @@ async def get_backtest() -> dict:
 @app.get("/api/history/status")
 async def get_history_status() -> dict:
     return engine.history_status()
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"ok": True}

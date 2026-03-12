@@ -1,8 +1,15 @@
 import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 
-const apiHost = process.env.REACT_APP_API_HOST || window.location.hostname || "localhost";
-const API = `http://${apiHost}:8001`;
+const host = window.location.hostname || "localhost";
+const API_CANDIDATES = [
+  process.env.REACT_APP_API_URL,
+  `http://${host}:8001`,
+  `http://${host}:8000`,
+  "http://localhost:8001",
+  "http://localhost:8000",
+].filter(Boolean);
+
 const tabs = ["LIVE", "CHART", "SIGNAL", "SESSIONS", "BACKTEST", "SETTINGS"];
 const tfs = ["15m", "1h", "4h", "1d", "1w"];
 
@@ -14,11 +21,30 @@ export default function App() {
   const [chartTf, setChartTf] = useState("1h");
   const [chartData, setChartData] = useState({ candles: [], label: "Loading..." });
   const [apiOnline, setApiOnline] = useState(false);
+  const [apiBase, setApiBase] = useState(API_CANDIDATES[0]);
+
+  const callApi = async (path, timeout = 5000) => {
+    const first = apiBase ? [apiBase] : [];
+    const ordered = [...first, ...API_CANDIDATES.filter((x) => x !== apiBase)];
+    let lastErr;
+    for (const base of ordered) {
+      try {
+        const resp = await axios.get(`${base}${path}`, { timeout });
+        if (base !== apiBase) {
+          setApiBase(base);
+        }
+        return resp.data;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr;
+  };
 
   useEffect(() => {
     const fetchHistory = async () => {
       try {
-        const { data } = await axios.get(`${API}/api/history/status`, { timeout: 4000 });
+        const data = await callApi("/api/history/status", 4000);
         setHistory(data);
         setApiOnline(true);
       } catch {
@@ -28,17 +54,18 @@ export default function App() {
     fetchHistory();
     const id = setInterval(fetchHistory, 2000);
     return () => clearInterval(id);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase]);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [stateResp, indResp] = await Promise.all([
-          axios.get(`${API}/api/state`, { timeout: 4000 }),
-          axios.get(`${API}/api/indicators`, { timeout: 4000 }),
+        const [stateData, indData] = await Promise.all([
+          callApi("/api/state", 4000),
+          callApi("/api/indicators", 4000),
         ]);
-        setState(stateResp.data);
-        setIndicatorData(indResp.data);
+        setState(stateData);
+        setIndicatorData(indData);
         setApiOnline(true);
       } catch {
         setApiOnline(false);
@@ -47,12 +74,13 @@ export default function App() {
     load();
     const id = setInterval(load, 3000);
     return () => clearInterval(id);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase]);
 
   useEffect(() => {
     const loadChart = async () => {
       try {
-        const { data } = await axios.get(`${API}/api/chart/${chartTf}`, { timeout: 5000 });
+        const data = await callApi(`/api/chart/${chartTf}`, 5000);
         setChartData(data);
       } catch {
         setChartData({ candles: [], label: "Chart unavailable" });
@@ -61,7 +89,8 @@ export default function App() {
     loadChart();
     const id = setInterval(loadChart, 5000);
     return () => clearInterval(id);
-  }, [chartTf]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartTf, apiBase]);
 
   const scoreStyle = useMemo(() => ({ width: `${state?.score || 0}%` }), [state]);
   const closes = chartData.candles.map((c) => c.close);
@@ -75,7 +104,7 @@ export default function App() {
           API: {apiOnline ? "ONLINE" : "OFFLINE"}
           {state?.connection_status ? ` • Feed: ${state.connection_status}` : ""}
         </p>
-        {!apiOnline && <p className="hint">Backend non joignable: vérifie `http://{apiHost}:8001/api/state`.</p>}
+        <p className="hint">Backend target: {apiBase}</p>
       </header>
 
       {!history.all_data_ready && (
