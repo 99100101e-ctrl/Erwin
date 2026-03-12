@@ -1,7 +1,14 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType, CrosshairMode } from 'lightweight-charts';
 
+const TIMEFRAMES = [
+  { id: '1h',  label: '1H',  key: 'candles1h' },
+  { id: '4h',  label: '4H',  key: 'candles4h' },
+  { id: '1d',  label: '1D',  key: 'candles1d' },
+];
+
 export default function ChartTab({ data }) {
+  const [tf, setTf] = useState('1h');
   const mainRef = useRef(null);
   const deltaRef = useRef(null);
   const mainChart = useRef(null);
@@ -88,8 +95,12 @@ export default function ChartTab({ data }) {
   }, []);
 
   // ── Data updates ──────────────────────────────────────────────────────────
+  // Pick candles for current timeframe
+  const tfKey = TIMEFRAMES.find(t => t.id === tf)?.key || 'candles1h';
+  const activeCandles = data[tfKey] || [];
+
   useEffect(() => {
-    const candles = data.candles1h;
+    const candles = activeCandles;
     if (!candles || !candles.length || !candleSeries.current) return;
 
     const sorted = [...candles].sort((a, b) => a.ts - b.ts);
@@ -136,45 +147,43 @@ export default function ChartTab({ data }) {
     }));
     try { deltaSeries.current.setData(deltaData); } catch (e) {}
 
-    // POC line — flat line across full time range at POC price
-    const poc = (data.indicators?.poc_1h) ?? null;
-    if (poc && sorted.length >= 2) {
-      try {
-        pocLine.current.setData([
-          { time: sorted[0].ts, value: poc },
-          { time: sorted[sorted.length - 1].ts, value: poc },
-        ]);
-      } catch (e) {}
+    // POC and LiqZone only meaningful on 1h
+    if (tf === '1h') {
+      const poc = (data.indicators?.poc_1h) ?? null;
+      if (poc && sorted.length >= 2) {
+        try {
+          pocLine.current.setData([
+            { time: sorted[0].ts, value: poc },
+            { time: sorted[sorted.length - 1].ts, value: poc },
+          ]);
+        } catch (e) {}
+      }
+
+      const liq = data.indicators?.liq_zone_1h?.zone ?? null;
+      if (liq && sorted.length >= 2) {
+        try {
+          liqLine.current.setData([
+            { time: sorted[0].ts, value: liq },
+            { time: sorted[sorted.length - 1].ts, value: liq },
+          ]);
+        } catch (e) {}
+      }
+    } else {
+      // Clear POC/liq lines for other timeframes
+      try { pocLine.current.setData([]); } catch (e) {}
+      try { liqLine.current.setData([]); } catch (e) {}
     }
 
-    // Liquidation zone line
-    const liq = data.indicators?.liq_zone_1h?.zone ?? null;
-    if (liq && sorted.length >= 2) {
-      try {
-        liqLine.current.setData([
-          { time: sorted[0].ts, value: liq },
-          { time: sorted[sorted.length - 1].ts, value: liq },
-        ]);
-      } catch (e) {}
-    }
-
-    // FVG zones — rendered as coloured horizontal band primitives
-    // lightweight-charts v4 supports IPrimitive via series.attachPrimitive
-    // Simple approach: draw FVGs as extra line pairs (upper + lower bounding the gap)
-    // We clear old FVG lines and re-draw
+    // FVG zones — only on 1h
     try {
       fvgPrimitives.current.forEach(s => mainChart.current?.removeSeries(s));
       fvgPrimitives.current = [];
-      const fvgs = data.indicators?.fvgs_1h ?? [];
+      const fvgs = tf === '1h' ? (data.indicators?.fvgs_1h ?? []) : [];
       fvgs.forEach(fvg => {
-        const color = fvg.type === 'BISI'
-          ? 'rgba(74,222,128,0.12)'
-          : 'rgba(248,113,113,0.12)';
         const borderColor = fvg.type === 'BISI'
           ? 'rgba(74,222,128,0.5)'
           : 'rgba(248,113,113,0.5)';
 
-        // Find the candle ts at fvg.ts and extend to end
         const startTs = fvg.ts;
         const endTs = sorted[sorted.length - 1].ts;
         if (startTs >= endTs) return;
@@ -197,20 +206,38 @@ export default function ChartTab({ data }) {
       });
     } catch (e) {}
 
-  
-  }, [data.candles1h, data.indicators]);
+  }, [activeCandles, data.indicators, tf]);
 
   const ind = data.indicators || {};
   const poc  = ind.poc_1h;
   const liq  = ind.liq_zone_1h;
   const adx  = ind.adx_1h;
   const fvgCount = (ind.fvgs_1h || []).length;
+  const tfLabel = TIMEFRAMES.find(t => t.id === tf)?.label || '1H';
 
   return (
     <div className="flex flex-col h-screen pb-20">
       {/* Header */}
       <div className="px-3 pt-2 pb-1 flex items-center justify-between gap-2 flex-wrap">
-        <h2 className="text-sm font-semibold text-gray-300">BTC/USD — 1H</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-gray-300">BTC/USD — {tfLabel}</h2>
+          {/* Timeframe selector */}
+          <div className="flex gap-1">
+            {TIMEFRAMES.map(t => (
+              <button
+                key={t.id}
+                onClick={() => setTf(t.id)}
+                className={`text-[10px] px-2 py-0.5 rounded font-semibold transition-colors ${
+                  tf === t.id
+                    ? 'bg-[#F7931A] text-black'
+                    : 'bg-gray-800 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="flex gap-2 text-[10px] flex-wrap">
           <span className="flex items-center gap-1 text-[#F7931A]">
             <span className="w-3 h-0.5 bg-[#F7931A] inline-block"/>EMA20
@@ -224,22 +251,22 @@ export default function ChartTab({ data }) {
           <span className="flex items-center gap-1 text-red-400/70">
             <span className="w-3 h-0.5 bg-red-400/50 inline-block"/>BB
           </span>
-          {poc && (
+          {tf === '1h' && poc && (
             <span className="text-yellow-400/80">
               POC ${poc.toLocaleString()}
             </span>
           )}
-          {liq?.near && (
+          {tf === '1h' && liq?.near && (
             <span className="text-red-400 font-semibold animate-pulse">
               ⚠️ LiqZone ${liq.zone?.toLocaleString()}
             </span>
           )}
-          {adx?.adx && (
+          {tf === '1h' && adx?.adx && (
             <span className={adx.trending ? 'text-green-400' : 'text-gray-500'}>
               ADX {adx.adx}
             </span>
           )}
-          {fvgCount > 0 && (
+          {tf === '1h' && fvgCount > 0 && (
             <span className="text-teal-400/70">{fvgCount} FVGs</span>
           )}
         </div>
@@ -254,9 +281,9 @@ export default function ChartTab({ data }) {
       </div>
       <div ref={deltaRef} className="chart-container" style={{ flex: '3 1 0' }} />
 
-      {data.candles1h.length === 0 && (
+      {activeCandles.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
-          Waiting for candle data...
+          Waiting for {tfLabel} candle data...
         </div>
       )}
     </div>

@@ -21,6 +21,8 @@ export function useWebSocket() {
     volatilityLevel: 'Low',
     signalHistory: [],
     candles1h: [],
+    candles4h: [],
+    candles1d: [],
     connected: false,
     lastUpdate: null,
   });
@@ -65,6 +67,8 @@ export function useWebSocket() {
             volatilityLevel: s.volatility_level || 'Low',
             signalHistory: s.signal_history || [],
             candles1h: s.candles_1h || [],
+            candles4h: s.candles_4h || [],
+            candles1d: s.candles_1d || [],
             connected: s.connected || false,
             lastUpdate: s.last_update || null,
           });

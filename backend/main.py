@@ -124,6 +124,7 @@ state: Dict = {
     "signal_history": [],
     "candles_1h": [],
     "candles_4h": [],
+    "candles_1d": [],
     "last_update": None,
     "connected": False,
 }
@@ -473,6 +474,8 @@ async def update_indicators_and_signal():
             state["signal_history"] = signal_engine.signal_history
 
         state["candles_1h"] = list(candle_store.candles_1h)[-100:]
+        state["candles_4h"] = list(candle_store.candles_4h)[-100:]
+        state["candles_1d"] = list(candle_store.candles_1d)[-100:]
         state["last_update"] = datetime.now(timezone.utc).isoformat()
 
         price_str = f"{price:.0f}" if price else "N/A"
@@ -590,6 +593,8 @@ async def get_state():
         "volatility_level": state.get("volatility_level", "Low"),
         "signal_history": state.get("signal_history", []),
         "candles_1h": state.get("candles_1h", []),
+        "candles_4h": state.get("candles_4h", []),
+        "candles_1d": state.get("candles_1d", []),
         "connected": state.get("connected", False),
         "last_update": state.get("last_update"),
     })
