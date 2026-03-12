@@ -23,8 +23,10 @@ export default function ChartTab({ data }) {
   const deltaSeries = useRef(null);
   const pocLine = useRef(null);
   const liqLine = useRef(null);
-  // FVG primitives stored as an array (cleared and re-added each update)
+  // FVG primitives: {topSeries, botSeries, fvg} per FVG zone
   const fvgPrimitives = useRef([]);
+  // Last FVG fingerprint to avoid unnecessary re-creates
+  const fvgHash = useRef('');
 
   // ── Chart initialisation ──────────────────────────────────────────────────
   useEffect(() => {
@@ -174,36 +176,50 @@ export default function ChartTab({ data }) {
       try { liqLine.current.setData([]); } catch (e) {}
     }
 
-    // FVG zones — only on 1h
+    // FVG zones — only on 1h; avoid recreating series on every candle tick
     try {
-      fvgPrimitives.current.forEach(s => mainChart.current?.removeSeries(s));
-      fvgPrimitives.current = [];
       const fvgs = tf === '1h' ? (data.indicators?.fvgs_1h ?? []) : [];
-      fvgs.forEach(fvg => {
-        const borderColor = fvg.type === 'BISI'
-          ? 'rgba(74,222,128,0.5)'
-          : 'rgba(248,113,113,0.5)';
+      const endTs = sorted[sorted.length - 1].ts;
 
-        const startTs = fvg.ts;
-        const endTs = sorted[sorted.length - 1].ts;
-        if (startTs >= endTs) return;
+      // Build fingerprint of FVG identity (not endTs which changes every candle)
+      const newHash = fvgs.map(f => `${f.ts}:${f.type}:${f.top}:${f.bottom}`).join('|');
 
-        // Top boundary
-        const topSeries = mainChart.current.addLineSeries({
-          color: borderColor, lineWidth: 1, lineStyle: 3,
-          lastValueVisible: false, priceLineVisible: false,
+      if (newHash !== fvgHash.current) {
+        // FVG list changed — full recreate
+        fvgPrimitives.current.forEach(p => {
+          try { mainChart.current?.removeSeries(p.top); } catch {}
+          try { mainChart.current?.removeSeries(p.bot); } catch {}
         });
-        topSeries.setData([{ time: startTs, value: fvg.top }, { time: endTs, value: fvg.top }]);
+        fvgPrimitives.current = [];
+        fvgHash.current = newHash;
 
-        // Bottom boundary
-        const botSeries = mainChart.current.addLineSeries({
-          color: borderColor, lineWidth: 1, lineStyle: 3,
-          lastValueVisible: false, priceLineVisible: false,
+        fvgs.forEach(fvg => {
+          const startTs = fvg.ts;
+          if (startTs >= endTs || !mainChart.current) return;
+          const borderColor = fvg.type === 'BISI'
+            ? 'rgba(74,222,128,0.5)'
+            : 'rgba(248,113,113,0.5)';
+          const top = mainChart.current.addLineSeries({
+            color: borderColor, lineWidth: 1, lineStyle: 3,
+            lastValueVisible: false, priceLineVisible: false,
+          });
+          top.setData([{ time: startTs, value: fvg.top }, { time: endTs, value: fvg.top }]);
+          const bot = mainChart.current.addLineSeries({
+            color: borderColor, lineWidth: 1, lineStyle: 3,
+            lastValueVisible: false, priceLineVisible: false,
+          });
+          bot.setData([{ time: startTs, value: fvg.bottom }, { time: endTs, value: fvg.bottom }]);
+          fvgPrimitives.current.push({ top, bot, fvg });
         });
-        botSeries.setData([{ time: startTs, value: fvg.bottom }, { time: endTs, value: fvg.bottom }]);
-
-        fvgPrimitives.current.push(topSeries, botSeries);
-      });
+      } else if (fvgPrimitives.current.length > 0) {
+        // FVGs unchanged — just extend endTs on existing series (no flicker)
+        fvgPrimitives.current.forEach(({ top, bot, fvg }) => {
+          try {
+            top.update({ time: endTs, value: fvg.top });
+            bot.update({ time: endTs, value: fvg.bottom });
+          } catch {}
+        });
+      }
     } catch (e) {}
 
   }, [activeCandles, data.indicators, tf]);
