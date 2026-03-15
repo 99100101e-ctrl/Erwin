@@ -1,34 +1,23 @@
 @echo off
-:: ============================================================
-::  BTC Trading Advisor — Strategie E
-::  Lanceur Windows — Double-cliquer pour demarrer
-:: ============================================================
-setlocal EnableDelayedExpansion
-
-:: Chemin automatique base sur l'emplacement du fichier
+setlocal
 set "ROOT=%~dp0"
-if "!ROOT:~-1!"=="\" set "ROOT=!ROOT:~0,-1!"
-
-set "BACKEND=!ROOT!\backend"
-set "FRONTEND=!ROOT!\frontend"
-set "VENV=!BACKEND!\.venv"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
 title BTC Trading Advisor - Strategie E
 
 echo.
 echo  ============================================================
-echo    BTC Trading Advisor - Strategie E (TP1 proche + Breakeven)
-echo    Dossier : !ROOT!
+echo    BTC Trading Advisor - Strategie E
+echo    Dossier : %ROOT%
 echo  ============================================================
 
 :: ---------- Verification Python ----------
 python --version >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo  [ERREUR] Python n'est pas installe.
-    echo  Telechargez-le sur : https://www.python.org/downloads/
-    echo  Cochez "Add Python to PATH" lors de l'installation.
-    echo.
+    echo  [ERREUR] Python non trouve. Installez Python 3.10+ et cochez
+    echo  "Add Python to PATH".
+    echo  https://www.python.org/downloads/
     pause
     exit /b 1
 )
@@ -37,68 +26,52 @@ if errorlevel 1 (
 node --version >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo  [ERREUR] Node.js n'est pas installe.
-    echo  Telechargez-le sur : https://nodejs.org/  (version LTS)
-    echo.
+    echo  [ERREUR] Node.js non trouve. Installez Node.js LTS.
+    echo  https://nodejs.org/
     pause
     exit /b 1
 )
 
-:: ---------- Backend : environnement virtuel ----------
+:: ---------- Venv Python ----------
 echo.
-echo  [1/4] Preparation du backend Python...
-cd /d "!BACKEND!"
-
-if not exist "!VENV!" (
-    echo        Creation du venv ^(premiere fois uniquement^)...
-    python -m venv "!VENV!"
+echo  [1/4] Preparation backend Python...
+if not exist "%ROOT%\backend\.venv" (
+    echo        Creation du venv...
+    python -m venv "%ROOT%\backend\.venv"
 )
+call "%ROOT%\backend\.venv\Scripts\activate.bat"
+pip install -q -r "%ROOT%\backend\requirements.txt"
+echo        OK.
 
-call "!VENV!\Scripts\activate.bat"
-pip install -q -r "!BACKEND!\requirements.txt"
-echo        Backend pret.
-
-:: ---------- Frontend : npm + build production ----------
+:: ---------- npm + build ----------
 echo.
-echo  [2/4] Preparation du frontend React...
-cd /d "!FRONTEND!"
-
-if not exist "!FRONTEND!\node_modules" (
-    echo        Installation npm ^(premiere fois, ~2 minutes^)...
+echo  [2/4] Installation des dependances npm...
+cd /d "%ROOT%\frontend"
+if not exist "node_modules" (
     npm install
 )
 
-echo  [3/4] Build de production en cours...
-call npm run build
-echo        Build termine.
+echo.
+echo  [3/4] Build React production...
+npm run build
+echo        OK.
 
 :: ---------- Lancement ----------
 echo.
-echo  [4/4] Lancement des services...
+echo  [4/4] Lancement...
 echo.
 echo   Backend  -^> http://localhost:8000
 echo   Frontend -^> http://localhost:3000
 echo   API docs -^> http://localhost:8000/docs
 echo.
-echo   Fermez les fenetres "Backend" et "Frontend" pour arreter.
 echo  ============================================================
-echo.
 
-:: Fenetre Backend
-set "CMD_BACKEND=cd /d "!BACKEND!" && call "!VENV!\Scripts\activate.bat" && python main.py"
-start "BTC Advisor Backend" cmd /k "!CMD_BACKEND!"
-
-:: Attendre que le backend demarre
+start "BTC - Backend" "%ROOT%\_backend.bat"
 timeout /t 5 /nobreak >nul
-
-:: Fenetre Frontend (serveur de production stable)
-set "CMD_FRONTEND=cd /d "!FRONTEND!" && node node_modules\serve\bin\serve.js -s build -l 3000"
-start "BTC Advisor Frontend" cmd /k "!CMD_FRONTEND!"
-
-:: Ouvrir le navigateur
+start "BTC - Frontend" "%ROOT%\_frontend.bat"
 timeout /t 4 /nobreak >nul
 start "" "http://localhost:3000"
 
-echo  Programme lance avec succes.
-echo  Appuyez sur une touche pour fermer cette fenetre.
-pause >nul
+echo.
+echo  Services lances. Fermez les fenetres Backend et Frontend pour arreter.
+pause
