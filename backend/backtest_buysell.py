@@ -1,20 +1,13 @@
 """
 Backtest BUY vs SELL — BTC Trading Advisor
-Analyse separee des signaux haussiers et baissiers.
-Questions cles :
-  - Le moteur detecte-t-il mieux les hausses ou les baisses ?
-  - Faut-il filtrer une direction en certaines conditions ?
-  - Le score est-il predictif differemment selon la direction ?
+Données RÉELLES : backend/data/btc_1h_real.json (6 derniers mois Binance)
 """
-from bt_common import (generate_btc_1an, precompute, run_backtest,
+from bt_common import (load_real_candles, precompute, run_backtest,
                         stats, print_stats_row, TRADE_SIZE)
 import numpy as np
 from collections import defaultdict
+from datetime import datetime, timezone
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Analyse BUY vs SELL par seuil
-# ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_par_seuil(candles, sigs):
     print(f"\n{'─' * 78}")
@@ -30,14 +23,10 @@ def analyse_par_seuil(candles, sigs):
         print(f"\n  Seuil >= {thresh} — {len(trades)} trades total")
         print(f"  {col}")
         print("  " + "─" * 78)
-        print_stats_row(f"  TOUS",              stats(trades))
-        print_stats_row(f"  BUY uniquement",    stats(buys))
-        print_stats_row(f"  SELL uniquement",   stats(sells))
+        print_stats_row("  TOUS",            stats(trades))
+        print_stats_row("  BUY uniquement",  stats(buys))
+        print_stats_row("  SELL uniquement", stats(sells))
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Distribution des outcomes BUY vs SELL
-# ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_outcomes(trades):
     print(f"\n{'─' * 78}")
@@ -63,10 +52,6 @@ def analyse_outcomes(trades):
         print()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Score vs Win Rate par direction
-# ─────────────────────────────────────────────────────────────────────────────
-
 def analyse_score_direction(trades):
     print(f"\n{'─' * 78}")
     print("  PARTIE 3 — Score signal vs Win Rate reel par direction")
@@ -86,42 +71,33 @@ def analyse_score_direction(trades):
                 print(f"  {lo:3d}-{hi:3d}      | {s['n']:5d} | {s['wr']:5.1f}% | {s['avg']:+7.2f}% | {s['net_eur']:+9.0f} EUR")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Courbe d'equite BUY vs SELL dans le temps
-# ─────────────────────────────────────────────────────────────────────────────
-
 def analyse_equite_mensuelle(candles, trades):
     print(f"\n{'─' * 78}")
     print("  PARTIE 4 — P&L mensuel BUY vs SELL (2000 EUR/trade)")
     print(f"{'─' * 78}")
-    months = ["Jan", "Fev", "Mar", "Avr", "Mai", "Jun",
-              "Jul", "Aou", "Sep", "Oct", "Nov", "Dec"]
     by_month = defaultdict(lambda: {"BUY": [], "SELL": []})
     for t in trades:
-        m = (candles[t["idx"]]["ts"] - 1704067200) // (30 * 24 * 3600)
-        by_month[m][t["direction"]].append(t["pnl_eur"])
+        dt = datetime.fromtimestamp(candles[t["idx"]]["ts"], tz=timezone.utc)
+        mk = (dt.year, dt.month)
+        by_month[mk][t["direction"]].append(t["pnl_eur"])
 
-    print(f"\n  {'Mois':>5} | {'BUY EUR':>10} | {'SELL EUR':>10} | {'TOTAL EUR':>11} | Bar")
+    print(f"\n  {'Mois':>8} | {'BUY EUR':>10} | {'SELL EUR':>10} | {'TOTAL EUR':>11} | Bar")
     print("  " + "─" * 65)
     cumul = 0
-    for m in sorted(by_month.keys()):
-        d = by_month[m]
+    for mk in sorted(by_month.keys()):
+        d = by_month[mk]
         buy_net  = sum(d["BUY"])  if d["BUY"]  else 0
         sell_net = sum(d["SELL"]) if d["SELL"] else 0
         total    = buy_net + sell_net
         cumul   += total
-        label = months[m % 12] if m < 12 else f"M{m+1}"
+        label = datetime(mk[0], mk[1], 1).strftime("%b %Y")
         bar = ("█" if total > 0 else "░") * min(int(abs(total) / 25), 25)
-        print(f"  {label:>5} | {buy_net:+10.0f} | {sell_net:+10.0f} | {total:+11.0f} | {bar}")
+        print(f"  {label:>8} | {buy_net:+10.0f} | {sell_net:+10.0f} | {total:+11.0f} | {bar}")
     print(f"  {'─' * 55}")
-    print(f"  {'TOTAL':>5} | {sum(t['pnl_eur'] for t in trades if t['direction']=='BUY'):+10.0f}"
+    print(f"  {'TOTAL':>8} | {sum(t['pnl_eur'] for t in trades if t['direction']=='BUY'):+10.0f}"
           f" | {sum(t['pnl_eur'] for t in trades if t['direction']=='SELL'):+10.0f}"
           f" | {cumul:+11.0f} |")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Recommandation
-# ─────────────────────────────────────────────────────────────────────────────
 
 def recommandation(trades):
     buys  = [t for t in trades if t["direction"] == "BUY"]
@@ -133,10 +109,10 @@ def recommandation(trades):
     if sb and ss:
         if ss["net_eur"] > sb["net_eur"] * 1.3:
             print("  -> Les signaux SELL sont nettement plus profitables sur cette periode.")
-            print("     Envisager un filtre : ne prendre les BUY qu'en tendance Bullish confirmee (EMA20>EMA50>EMA200).")
+            print("     Envisager un filtre : BUY uniquement en tendance Bullish (EMA20>EMA50>EMA200).")
         elif sb["net_eur"] > ss["net_eur"] * 1.3:
             print("  -> Les signaux BUY sont nettement plus profitables sur cette periode.")
-            print("     Envisager un filtre : ne prendre les SELL qu'en tendance Bearish confirmee (EMA20<EMA50<EMA200).")
+            print("     Envisager un filtre : SELL uniquement en tendance Bearish (EMA20<EMA50<EMA200).")
         else:
             print("  -> BUY et SELL sont equilibres. La strategie est bidirectionnelle saine.")
         print(f"\n  BUY  : {sb['n']} trades | {sb['wr']:.1f}% win | {sb['net_eur']:+.0f} EUR net")
@@ -144,20 +120,13 @@ def recommandation(trades):
     print(f"{'=' * 78}\n")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-
 def run():
     print("\n" + "=" * 78)
-    print("  BACKTEST BUY vs SELL — BTC Trading Advisor — 1 an — 2000 EUR/trade")
+    print("  BACKTEST BUY vs SELL — BTC Trading Advisor — DONNÉES RÉELLES BINANCE")
     print("=" * 78)
 
-    candles = generate_btc_1an()
-    p0 = candles[200]["close"]; p1 = candles[-1]["close"]
-    print(f"\n  BTC simule : ${p0:,.0f} -> ${p1:,.0f}  ({(p1/p0-1)*100:+.1f}%)\n")
-
-    print("  Precompute signaux...")
+    candles = load_real_candles()
+    print("\n  Precompute signaux...")
     sigs = precompute(candles)
     if not sigs:
         print("  Aucun signal. Abandon."); return

@@ -1,8 +1,11 @@
 """
 Module commun pour tous les backtests BTC Trading Advisor.
-Contient : generateur de donnees, precompute, simulation Strategie E, stats.
+Contient : chargement données réelles, precompute, simulation Strategie E, stats.
+
+DONNÉES : lit backend/data/btc_1h_real.json (généré par fetch_btc_data.py).
+Si le fichier est absent, une erreur claire est levée — plus de données inventées.
 """
-import random, math
+import json, os, math
 import numpy as np
 from collections import defaultdict
 from indicators import calculate_all_indicators
@@ -10,51 +13,44 @@ from signal_engine import SignalEngine
 
 TRADE_SIZE = 2000  # EUR par trade
 
+DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "btc_1h_real.json")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Generateur synthetique BTC 1 an (1h candles)
+# Chargement données réelles BTC
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_btc_1an(n=8760, start=67000.0, seed=42):
-    random.seed(seed); np.random.seed(seed)
-    prices = [start]; vols = [1000.0]
-    regime = "bull"; remaining = random.randint(200, 600); cur_vol = 0.008
-    regimes_log = []
-    for i in range(1, n):
-        remaining -= 1
-        if remaining <= 0:
-            regime = random.choices(["bull", "bear", "sideways"], weights=[.40, .25, .35])[0]
-            remaining = random.randint(100, 500)
-        shock = abs(random.gauss(0, 1))
-        cur_vol = 0.85 * cur_vol + 0.15 * (
-            {"bull": .007, "bear": .010, "sideways": .005}[regime] * (0.5 + shock))
-        drift = {"bull": .00015, "bear": -.00012, "sideways": 0.0}[regime]
-        ret = random.gauss(drift, cur_vol)
-        if random.random() < 0.005:
-            ret += random.choice([-1, 1]) * random.uniform(.02, .04)
-        prices.append(max(prices[-1] * math.exp(ret), 1000))
-        vols.append(random.uniform(400, 1200) * (1 + 3 * abs(ret) / max(cur_vol, 1e-9)))
-        regimes_log.append(regime)
-    candles = []
-    for i, (c, v) in enumerate(zip(prices, vols)):
-        sp = c * random.uniform(.001, .004); o = prices[i - 1] if i > 0 else c
-        h = max(o, c) + sp * random.uniform(.2, 1.)
-        l = min(o, c) - sp * random.uniform(.2, 1.)
-        candles.append({
-            "ts": 1735689600 + i * 3600,
-            "open": round(o, 2), "high": round(h, 2),
-            "low": round(l, 2), "close": round(c, 2), "volume": round(v, 2),
-            "regime": regimes_log[i - 1] if i > 0 else "bull",
-        })
+def load_real_candles(path=DATA_PATH):
+    """
+    Charge les bougies réelles depuis btc_1h_real.json.
+    Lève une erreur claire si le fichier est absent.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"\n\n❌  DONNÉES RÉELLES MANQUANTES\n"
+            f"   Fichier attendu : {path}\n\n"
+            f"   Lance d'abord sur ta machine Windows :\n"
+            f"       python fetch_btc_data.py\n"
+            f"   puis :\n"
+            f"       git add backend/data/btc_1h_real.json && git push\n"
+        )
+    with open(path) as f:
+        candles = json.load(f)
+    candles = sorted(candles, key=lambda x: x["ts"])
+    print(f"  Données réelles : {len(candles)} bougies 1h chargées")
+    from datetime import datetime, timezone
+    d0 = datetime.fromtimestamp(candles[0]["ts"], tz=timezone.utc).strftime("%d %b %Y")
+    d1 = datetime.fromtimestamp(candles[-1]["ts"], tz=timezone.utc).strftime("%d %b %Y")
+    print(f"  Période         : {d0} → {d1}")
+    print(f"  Prix            : ${candles[0]['close']:,.0f} → ${candles[-1]['close']:,.0f}")
     return candles
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Precompute signaux (SANS opens_1h — parametre invalide corrige)
+# Precompute signaux
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ema_trend(ind: dict) -> str:
-    """Calcule la tendance EMA (bull/bear/sideways) a partir des indicateurs 1h."""
     emas = ind.get("emas_1h") or {}
     e20, e50, e200 = emas.get("ema20"), emas.get("ema50"), emas.get("ema200")
     if e20 and e50 and e200:
@@ -66,19 +62,13 @@ def _ema_trend(ind: dict) -> str:
 
 
 def precompute(candles, warmup=200, step=4, verbose=True):
-    """
-    Retourne tous les signaux potentiels (>= score brut 70, avant filtres de tendance).
-    Chaque signal inclut : trend (bull/bear/sideways) et trend_age_h.
-    Les filtres trend_filter / early_regime sont appliques dans run_backtest().
-    """
     sigs = []; errors = 0
     total = (len(candles) - warmup) // step
     if verbose:
         print(f"  Calcul sur ~{total} points (step={step}h)...", end="", flush=True)
 
-    # Tracking du regime EMA entre iterations
     _cur_trend = "sideways"
-    _trend_since_i = warmup  # index candle du debut du regime actuel
+    _trend_since_i = warmup
 
     for i in range(warmup, len(candles) - 73, step):
         w = candles[max(0, i - 249):i + 1]
@@ -93,19 +83,13 @@ def precompute(candles, warmup=200, step=4, verbose=True):
         except Exception:
             errors += 1; continue
 
-        # Mise a jour du regime EMA
         trend = _ema_trend(ind)
         if trend != _cur_trend:
             _cur_trend = trend
             _trend_since_i = i
-        trend_age_h = i - _trend_since_i  # 1 bar = 1h
+        trend_age_h = i - _trend_since_i
 
-        # Score brut — on n'utilise PAS la suppression du SignalEngine (etat vierge
-        # = early_regime toujours vrai, cooldown = 0). On applique les filtres dans
-        # run_backtest() avec les donnees trend/trend_age_h calculees ci-dessus.
         sig = SignalEngine().evaluate(ind, c[-1])
-        # Garder depuis 60 pour permettre la detection du franchissement de seuil
-        # (ex: score 65 → prev<70, puis 70+ → trade). Le seuil reel est dans run_backtest.
         if sig.get("score", 0) < 60:
             continue
         if not sig.get("stop_loss") or not sig.get("tp1"):
@@ -114,15 +98,15 @@ def precompute(candles, warmup=200, step=4, verbose=True):
         if atr <= 0:
             continue
         hour_utc = (candles[i]["ts"] % 86400) // 3600
-        day_of_week = (candles[i]["ts"] // 86400) % 7  # 0=Jeu (epoch=Thu)
+        day_of_week = (candles[i]["ts"] // 86400) % 7
         sigs.append({
             "idx": i, "score": sig["score"], "direction": sig["direction"],
             "price": c[-1], "atr": atr,
-            "regime": candles[i].get("regime", "unknown"),
-            "hour": hour_utc,
-            "dow": day_of_week,
-            "trend": trend,                # bull | bear | sideways (EMA alignment)
-            "trend_age_h": trend_age_h,    # heures depuis le dernier changement de tendance
+            "stop_loss": sig.get("stop_loss"), "tp1": sig.get("tp1"),
+            "tp2": sig.get("tp2"), "tp3": sig.get("tp3"),
+            "hour": hour_utc, "dow": day_of_week,
+            "trend": trend, "trend_age_h": trend_age_h,
+            "ts": candles[i]["ts"],
         })
         if verbose and len(sigs) % 100 == 0:
             print(".", end="", flush=True)
@@ -180,34 +164,20 @@ def sim_E(candles, idx, direction, atr, max_bars=72):
 # Backtest sur un groupe de signaux (Strategie E)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_backtest(candles, sigs, thresh=70,
-                 trend_filter=False, min_trend_age=0):
-    """
-    Simule les trades sur la liste de signaux.
-
-    Parametres de filtre :
-      trend_filter   : si True, BUY uniquement en 'bull', SELL uniquement en 'bear'
-      min_trend_age  : nombre minimum de barres (heures) dans le regime avant de trader
-                       (0 = pas de filtre, 48 = eviter debut de regime)
-    """
+def run_backtest(candles, sigs, thresh=70, trend_filter=False, min_trend_age=0):
     trades = []; end_idx = 0; prev = 0
     for s in sigs:
         if s["idx"] < end_idx:
             prev = s["score"]; continue
         if not (prev < thresh <= s["score"]):
             prev = s["score"]; continue
-
-        # Filtre tendance EMA
         if trend_filter:
             if s["direction"] == "BUY" and s.get("trend") != "bull":
                 prev = s["score"]; continue
             if s["direction"] == "SELL" and s.get("trend") != "bear":
                 prev = s["score"]; continue
-
-        # Filtre debut de regime (eviter <48h apres un changement de tendance)
         if min_trend_age > 0 and s.get("trend_age_h", 9999) < min_trend_age:
             prev = s["score"]; continue
-
         prev = s["score"]
         pnl, rsn, bars = sim_E(candles, s["idx"], s["direction"], s["atr"])
         if rsn == "skip":
@@ -240,7 +210,6 @@ def stats(trades):
         if v > pk: pk = v
         mdd = max(mdd, (pk - v) / pk)
     losses = [p for p in pnls if p < 0]
-    # Serie de pertes consecutives max
     max_streak = cur_streak = 0
     for p in pnls:
         if p < 0:

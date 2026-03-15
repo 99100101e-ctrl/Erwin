@@ -1,29 +1,19 @@
 """
 Backtest Analyse Horaire — BTC Trading Advisor
-Questions cles :
-  - Quelles heures UTC genèrent les meilleurs signaux ?
-  - Faut-il eviter certaines plages (nuit, faible liquidite) ?
-  - Les sessions Asia / Europe / US ont-elles des performances differentes ?
+Données RÉELLES : backend/data/btc_1h_real.json (6 derniers mois Binance)
 """
-from bt_common import (generate_btc_1an, precompute, run_backtest,
+from bt_common import (load_real_candles, precompute, run_backtest,
                         stats, TRADE_SIZE)
 import numpy as np
 from collections import defaultdict
 
-
-# Sessions de trading (UTC)
 SESSIONS = {
     "Asie    (00h-08h UTC)": range(0, 8),
     "Europe  (08h-16h UTC)": range(8, 16),
     "US      (16h-24h UTC)": range(16, 24),
 }
-
 JOURS = ["Jeu", "Ven", "Sam", "Dim", "Lun", "Mar", "Mer"]  # epoch=Thu
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Partie 1 — Performance par session de trading
-# ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_sessions(trades):
     print(f"\n{'─' * 70}")
@@ -31,40 +21,33 @@ def analyse_sessions(trades):
     print(f"{'─' * 70}")
     print(f"\n  {'Session':<28} | {'N':>5} | {'Win%':>6} | {'P&L moy':>8} | {'Net EUR':>10} | {'SL%':>5}")
     print("  " + "─" * 68)
+    nets = {}
+    for session, hours in SESSIONS.items():
+        group = [t for t in trades if t.get("hour", 0) in hours]
+        s = stats(group)
+        nets[session] = s["net_eur"] if s else 0
     for session, hours in SESSIONS.items():
         group = [t for t in trades if t.get("hour", 0) in hours]
         s = stats(group)
         if s:
-            flag = "  <- meilleure" if s["net_eur"] == max(
-                stats([t for t in trades if t.get("hour", 0) in h])["net_eur"]
-                for h in SESSIONS.values()
-                if stats([t for t in trades if t.get("hour", 0) in h])
-            ) else ""
+            flag = "  <- meilleure" if s["net_eur"] == max(nets.values()) else ""
             print(f"  {session:<28} | {s['n']:5d} | {s['wr']:5.1f}% | {s['avg']:+7.2f}% | {s['net_eur']:+9.0f} EUR | {s['sl_pct']:4.0f}%{flag}")
         else:
             print(f"  {session:<28} |  <3   |   -    |    -     |    -       |   -")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Partie 2 — Classement de chaque heure UTC (0-23)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def analyse_heure_par_heure(trades):
     print(f"\n{'─' * 70}")
     print("  PARTIE 2 — Classement heure par heure (0h-23h UTC)")
     print(f"{'─' * 70}")
-
     by_hour = {}
     for h in range(24):
         group = [t for t in trades if t.get("hour") == h]
         if len(group) >= 3:
             by_hour[h] = (group, stats(group))
-
     if not by_hour:
         print("  Pas assez de donnees par heure."); return
-
     ranked = sorted(by_hour.items(), key=lambda x: x[1][1]["net_eur"] if x[1][1] else 0, reverse=True)
-
     print(f"\n  {'Heure':>7} | {'N':>4} | {'Win%':>6} | {'P&L moy':>8} | {'Net EUR':>10} | Barre")
     print("  " + "─" * 65)
     for h, (group, s) in ranked:
@@ -73,10 +56,6 @@ def analyse_heure_par_heure(trades):
         bar = ("█" if s["net_eur"] > 0 else "░") * min(int(abs(s["net_eur"]) / 15), 20)
         print(f"  {h:02d}h [{session}] | {s['n']:4d} | {s['wr']:5.1f}% | {s['avg']:+7.2f}% | {s['net_eur']:+9.0f} EUR | {bar}")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Partie 3 — Performance par jour de la semaine
-# ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_jour_semaine(trades):
     print(f"\n{'─' * 70}")
@@ -93,10 +72,6 @@ def analyse_jour_semaine(trades):
         else:
             print(f"  {JOURS[d]:<10} |  <3   |   -    |    -     |    -")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Partie 4 — Heatmap Heure x Session (ASCII)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def heatmap_session_direction(trades):
     print(f"\n{'─' * 70}")
@@ -121,10 +96,6 @@ def heatmap_session_direction(trades):
         print("       Legende: ██=WR>60%  ▓▓=50-60%  ░░=40-50%  __=<40%  ??=insuf.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Partie 5 — Simulation avec filtre horaire (eviter les pires heures)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def analyse_filtre_horaire(candles, sigs):
     print(f"\n{'─' * 70}")
     print("  PARTIE 5 — Impact d'un filtre horaire sur les performances")
@@ -132,15 +103,12 @@ def analyse_filtre_horaire(candles, sigs):
     trades_all = run_backtest(candles, sigs, thresh=70)
     if not trades_all: return
 
-    # Identifier les heures rentables (net > 0)
     by_hour = defaultdict(list)
     for t in trades_all:
         by_hour[t.get("hour", 0)].append(t["pnl_eur"])
     good_hours = {h for h, pnls in by_hour.items() if sum(pnls) > 0 and len(pnls) >= 3}
-    bad_hours  = {h for h, pnls in by_hour.items() if sum(pnls) <= 0 and len(pnls) >= 3}
 
     trades_good = [t for t in trades_all if t.get("hour") in good_hours]
-    trades_bad  = [t for t in trades_all if t.get("hour") in bad_hours]
     trades_sessions = {
         "Asie seulement (00-08h)":    [t for t in trades_all if t.get("hour", 0) < 8],
         "Europe seulement (08-16h)":  [t for t in trades_all if 8 <= t.get("hour", 0) < 16],
@@ -153,35 +121,26 @@ def analyse_filtre_horaire(candles, sigs):
     if s: print(f"  {'Aucun filtre (baseline)':<32} | {s['n']:5d} | {s['wr']:5.1f}% | {s['net_eur']:+9.0f} EUR | {s['sl_pct']:4.0f}%")
     s = stats(trades_good)
     if s:
-        good_list = sorted(good_hours)
         print(f"  {'Heures rentables seulement':<32} | {s['n']:5d} | {s['wr']:5.1f}% | {s['net_eur']:+9.0f} EUR | {s['sl_pct']:4.0f}%")
-        print(f"    -> heures incluses : {good_list}")
+        print(f"    -> heures incluses : {sorted(good_hours)}")
     for label, group in trades_sessions.items():
         s = stats(group)
         if s:
             print(f"  {label:<32} | {s['n']:5d} | {s['wr']:5.1f}% | {s['net_eur']:+9.0f} EUR | {s['sl_pct']:4.0f}%")
-        else:
-            print(f"  {label:<32} |  <3   |   -    |    -       |   -")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Recommandation
-# ─────────────────────────────────────────────────────────────────────────────
 
 def recommandation(trades):
     print(f"\n{'=' * 70}")
     print("  RECOMMANDATION — Heures")
     print(f"{'=' * 70}")
-
     session_stats = {}
     for session, hours in SESSIONS.items():
         group = [t for t in trades if t.get("hour", 0) in hours]
         s = stats(group)
         if s:
             session_stats[session] = s
-
     if session_stats:
-        best = max(session_stats.items(), key=lambda x: x[1]["net_eur"])
+        best  = max(session_stats.items(), key=lambda x: x[1]["net_eur"])
         worst = min(session_stats.items(), key=lambda x: x[1]["net_eur"])
         print(f"\n  Meilleure session : {best[0].strip()}  ({best[1]['wr']:.1f}% WR, {best[1]['net_eur']:+.0f} EUR)")
         print(f"  Pire session      : {worst[0].strip()}  ({worst[1]['wr']:.1f}% WR, {worst[1]['net_eur']:+.0f} EUR)")
@@ -189,25 +148,17 @@ def recommandation(trades):
             print(f"\n  -> Envisager d'eviter la session {worst[0].strip()} ou de reduire la taille de position.")
         else:
             print("\n  -> Toutes les sessions sont acceptables. Pas de filtre horaire necessaire.")
-
     print(f"{'=' * 70}\n")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-
 def run():
     print("\n" + "=" * 70)
-    print("  BACKTEST ANALYSE HORAIRE — BTC Trading Advisor — 1 an — 2000 EUR/trade")
+    print("  BACKTEST ANALYSE HORAIRE — BTC Trading Advisor — DONNÉES RÉELLES BINANCE")
     print("  Sessions : Asie (00-08h) | Europe (08-16h) | US (16-24h)")
     print("=" * 70)
 
-    candles = generate_btc_1an()
-    p0 = candles[200]["close"]; p1 = candles[-1]["close"]
-    print(f"\n  BTC simule : ${p0:,.0f} -> ${p1:,.0f}  ({(p1/p0-1)*100:+.1f}%)\n")
-
-    print("  Precompute signaux...")
+    candles = load_real_candles()
+    print("\n  Precompute signaux...")
     sigs = precompute(candles)
     if not sigs:
         print("  Aucun signal. Abandon."); return
