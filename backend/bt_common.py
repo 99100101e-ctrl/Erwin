@@ -53,11 +53,33 @@ def generate_btc_1an(n=8760, start=67000.0, seed=42):
 # Precompute signaux (SANS opens_1h — parametre invalide corrige)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ema_trend(ind: dict) -> str:
+    """Calcule la tendance EMA (bull/bear/sideways) a partir des indicateurs 1h."""
+    emas = ind.get("emas_1h") or {}
+    e20, e50, e200 = emas.get("ema20"), emas.get("ema50"), emas.get("ema200")
+    if e20 and e50 and e200:
+        if e20 > e50 > e200:
+            return "bull"
+        if e20 < e50 < e200:
+            return "bear"
+    return "sideways"
+
+
 def precompute(candles, warmup=200, step=4, verbose=True):
+    """
+    Retourne tous les signaux potentiels (>= score brut 70, avant filtres de tendance).
+    Chaque signal inclut : trend (bull/bear/sideways) et trend_age_h.
+    Les filtres trend_filter / early_regime sont appliques dans run_backtest().
+    """
     sigs = []; errors = 0
     total = (len(candles) - warmup) // step
     if verbose:
         print(f"  Calcul sur ~{total} points (step={step}h)...", end="", flush=True)
+
+    # Tracking du regime EMA entre iterations
+    _cur_trend = "sideways"
+    _trend_since_i = warmup  # index candle du debut du regime actuel
+
     for i in range(warmup, len(candles) - 73, step):
         w = candles[max(0, i - 249):i + 1]
         c = [x["close"] for x in w]; h = [x["high"] for x in w]
@@ -70,8 +92,21 @@ def precompute(candles, warmup=200, step=4, verbose=True):
             ind = calculate_all_indicators(c, h, l, v, c4, h4, l4, v4, timestamps_1h=ts)
         except Exception:
             errors += 1; continue
+
+        # Mise a jour du regime EMA
+        trend = _ema_trend(ind)
+        if trend != _cur_trend:
+            _cur_trend = trend
+            _trend_since_i = i
+        trend_age_h = i - _trend_since_i  # 1 bar = 1h
+
+        # Score brut — on n'utilise PAS la suppression du SignalEngine (etat vierge
+        # = early_regime toujours vrai, cooldown = 0). On applique les filtres dans
+        # run_backtest() avec les donnees trend/trend_age_h calculees ci-dessus.
         sig = SignalEngine().evaluate(ind, c[-1])
-        if sig.get("suppressed") or sig.get("signal") in ("HOLD", "WAIT"):
+        # Garder depuis 60 pour permettre la detection du franchissement de seuil
+        # (ex: score 65 → prev<70, puis 70+ → trade). Le seuil reel est dans run_backtest.
+        if sig.get("score", 0) < 60:
             continue
         if not sig.get("stop_loss") or not sig.get("tp1"):
             continue
@@ -86,6 +121,8 @@ def precompute(candles, warmup=200, step=4, verbose=True):
             "regime": candles[i].get("regime", "unknown"),
             "hour": hour_utc,
             "dow": day_of_week,
+            "trend": trend,                # bull | bear | sideways (EMA alignment)
+            "trend_age_h": trend_age_h,    # heures depuis le dernier changement de tendance
         })
         if verbose and len(sigs) % 100 == 0:
             print(".", end="", flush=True)
@@ -143,13 +180,34 @@ def sim_E(candles, idx, direction, atr, max_bars=72):
 # Backtest sur un groupe de signaux (Strategie E)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_backtest(candles, sigs, thresh=70):
+def run_backtest(candles, sigs, thresh=70,
+                 trend_filter=False, min_trend_age=0):
+    """
+    Simule les trades sur la liste de signaux.
+
+    Parametres de filtre :
+      trend_filter   : si True, BUY uniquement en 'bull', SELL uniquement en 'bear'
+      min_trend_age  : nombre minimum de barres (heures) dans le regime avant de trader
+                       (0 = pas de filtre, 48 = eviter debut de regime)
+    """
     trades = []; end_idx = 0; prev = 0
     for s in sigs:
         if s["idx"] < end_idx:
             prev = s["score"]; continue
         if not (prev < thresh <= s["score"]):
             prev = s["score"]; continue
+
+        # Filtre tendance EMA
+        if trend_filter:
+            if s["direction"] == "BUY" and s.get("trend") != "bull":
+                prev = s["score"]; continue
+            if s["direction"] == "SELL" and s.get("trend") != "bear":
+                prev = s["score"]; continue
+
+        # Filtre debut de regime (eviter <48h apres un changement de tendance)
+        if min_trend_age > 0 and s.get("trend_age_h", 9999) < min_trend_age:
+            prev = s["score"]; continue
+
         prev = s["score"]
         pnl, rsn, bars = sim_E(candles, s["idx"], s["direction"], s["atr"])
         if rsn == "skip":

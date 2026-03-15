@@ -8,6 +8,10 @@ from typing import Dict, List, Optional
 from datetime import datetime, timezone
 
 
+MIN_SCORE = 70          # seuil minimum pour un signal actionnable
+EARLY_REGIME_H = 48    # heures avant qu'un nouveau regime soit considere etabli
+
+
 class SignalEngine:
     def __init__(self):
         self.last_signal_time: Dict[str, float] = {}
@@ -15,6 +19,8 @@ class SignalEngine:
         self.max_history = 50          # spec: last 50 signals
         self._pending_signal: Optional[str] = None
         self._pending_count: int = 0
+        self._last_trend: Optional[str] = None   # "bull" | "bear" | "sideways"
+        self._trend_since: float = 0.0           # timestamp du debut du regime actuel
 
     # ─────────────────────────────────────────────────────────────────────────
     def evaluate(self, indicators: Dict, current_price: float) -> Dict:
@@ -81,10 +87,18 @@ class SignalEngine:
 
         volatility_extreme = atr_pct is not None and atr_pct > 2.5
 
+        # ── Trend detection + regime age ─────────────────────────────────────
+        trend = self._detect_trend(indicators)
+        if trend != self._last_trend:
+            self._last_trend = trend
+            self._trend_since = now
+        trend_age_h = (now - self._trend_since) / 3600  # heures dans le regime actuel
+        early_regime = trend_age_h < EARLY_REGIME_H
+
         # ── Classify raw signal ──────────────────────────────────────────────
         if score >= 100:
             raw_signal = f"STRONG_{direction}"
-        elif score >= 60:
+        elif score >= MIN_SCORE:
             raw_signal = f"MODERATE_{direction}"
         else:
             raw_signal = "HOLD"
@@ -103,6 +117,24 @@ class SignalEngine:
 
         # ── Suppression checks ────────────────────────────────────────────────
         suppress_reasons = []
+
+        # Filtre de tendance : BUY uniquement en Bull, SELL uniquement en Bear
+        if score >= MIN_SCORE:
+            if direction == "BUY" and trend != "bull":
+                suppress_reasons.append(
+                    f"Trend filter: BUY bloque ({trend}) — attend EMA20>EMA50>EMA200"
+                )
+            elif direction == "SELL" and trend != "bear":
+                suppress_reasons.append(
+                    f"Trend filter: SELL bloque ({trend}) — attend EMA20<EMA50<EMA200"
+                )
+
+        # Filtre debut de regime : attendre 48h apres un changement de tendance
+        if score >= MIN_SCORE and early_regime and not suppress_reasons:
+            h_left = int(EARLY_REGIME_H - trend_age_h)
+            suppress_reasons.append(
+                f"Debut de regime {trend} ({trend_age_h:.0f}h/{EARLY_REGIME_H}h) — attendre {h_left}h"
+            )
 
         if 0 <= utc_hour < 6:
             suppress_reasons.append("Low-volume window (00:00–06:00 UTC)")
@@ -141,7 +173,7 @@ class SignalEngine:
         suppressed = len(suppress_reasons) > 0
 
         # ── Confidence & final signal label ──────────────────────────────────
-        if suppressed or score < 60:
+        if suppressed or score < MIN_SCORE:
             confidence = "Low"
         elif score < 80:
             confidence = "Medium"
@@ -149,8 +181,8 @@ class SignalEngine:
             confidence = "High"
 
         if suppressed:
-            signal_label = "WAIT" if score >= 60 else "HOLD"
-        elif score < 60:
+            signal_label = "WAIT" if score >= MIN_SCORE else "HOLD"
+        elif score < MIN_SCORE:
             signal_label = "HOLD"
         elif score < 80:
             signal_label = f"MODERATE_{direction}"
@@ -178,9 +210,12 @@ class SignalEngine:
             "volatility_extreme": volatility_extreme,
             "suppressed": suppressed,
             "suppress_reason": "; ".join(suppress_reasons) if suppress_reasons else None,
-            "suppress_reasons": suppress_reasons,    # NEW: list for multi-reason display
-            "cooldown_remaining": cooldown_remaining, # NEW: seconds
+            "suppress_reasons": suppress_reasons,    # list for multi-reason display
+            "cooldown_remaining": cooldown_remaining,
             "atr_pct": atr_pct,
+            "trend": trend,                          # "bull" | "bear" | "sideways"
+            "trend_age_h": round(trend_age_h, 1),    # heures dans le regime actuel
+            "early_regime": early_regime,            # True si < 48h depuis changement tendance
         }
         if risk:
             result.update(risk)
@@ -189,6 +224,26 @@ class SignalEngine:
 
         result["reasoning"] = self._build_reasoning(signal_label, approach, conditions_met, conditions_failed, score)
         return result
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def _detect_trend(self, ind: Dict) -> str:
+        """
+        Determine le regime de tendance a partir des EMAs 1h.
+        bull     : EMA20 > EMA50 > EMA200  (alignement haussier complet)
+        bear     : EMA20 < EMA50 < EMA200  (alignement baissier complet)
+        sideways : tout autre cas (EMAs entrelacees, pas de direction claire)
+        """
+        emas = ind.get("emas_1h") or {}
+        ema20  = emas.get("ema20")
+        ema50  = emas.get("ema50")
+        ema200 = emas.get("ema200")
+        if not (ema20 and ema50 and ema200):
+            return "sideways"
+        if ema20 > ema50 > ema200:
+            return "bull"
+        if ema20 < ema50 < ema200:
+            return "bear"
+        return "sideways"
 
     # ─────────────────────────────────────────────────────────────────────────
     def _check_buy(self, ind, price, atr_pct):
