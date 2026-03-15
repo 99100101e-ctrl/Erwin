@@ -6,12 +6,9 @@ import App from './App';
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
 
-// Register Service Worker
+// Unregister any existing service workers (they cause reload loops)
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').then(
-      (reg) => console.log('SW registered:', reg.scope),
-      (err) => console.warn('SW registration failed:', err)
-    );
+  navigator.serviceWorker.getRegistrations().then((registrations) => {
+    registrations.forEach((reg) => reg.unregister());
   });
 }

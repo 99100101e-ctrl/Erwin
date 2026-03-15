@@ -6,6 +6,8 @@
     "ajv": "^8.18.0",
     "ajv-keywords": "^5.1.0",
     "date-fns": "^3.6.0",
+    "http-proxy-middleware": "^2.0.7",
+    "serve": "^14.2.3",
     "lightweight-charts": "^4.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
