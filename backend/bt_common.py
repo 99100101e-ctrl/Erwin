@@ -41,7 +41,7 @@ def generate_btc_1an(n=8760, start=67000.0, seed=42):
         h = max(o, c) + sp * random.uniform(.2, 1.)
         l = min(o, c) - sp * random.uniform(.2, 1.)
         candles.append({
-            "ts": 1704067200 + i * 3600,
+            "ts": 1735689600 + i * 3600,
             "open": round(o, 2), "high": round(h, 2),
             "low": round(l, 2), "close": round(c, 2), "volume": round(v, 2),
             "regime": regimes_log[i - 1] if i > 0 else "bull",
