@@ -150,9 +150,11 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
     minus_di = 100.0 * minus_di_s / np.where(atr_s == 0, eps, atr_s)
     di_sum = plus_di + minus_di
     dx = 100.0 * np.abs(plus_di - minus_di) / np.where(di_sum == 0, eps, di_sum)
-    adx = _wilder_smooth(dx, period)
 
-    adx_val = adx[-1]
+    # Strip leading NaN before Wilder smoothing (NaN from first period-1 bars)
+    valid_start = period - 1
+    adx_raw = _wilder_smooth(dx[valid_start:], period)
+    adx_val = adx_raw[-1]
     if np.isnan(adx_val):
         return None
     return {
