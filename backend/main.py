@@ -6,6 +6,7 @@ Calculates indicators and emits trading signals every 60 seconds.
 import asyncio
 import json
 import logging
+import os
 import random
 import socket
 import time
@@ -718,10 +719,12 @@ async def startup_event():
     print("\n" + "=" * 60)
     print("  BTC Trading Advisor — Backend Started")
     print("=" * 60)
-    print(f"  Local:    http://localhost:8000")
-    print(f"  Network:  http://{local_ip}:8000  (iPhone access)")
-    print(f"  Frontend: http://localhost:3000")
-    print(f"  API docs: http://localhost:8000/docs")
+    _port = int(os.environ.get("BACKEND_PORT", 8000))
+    _front = int(os.environ.get("FRONTEND_PORT", 3000))
+    print(f"  Local:    http://localhost:{_port}")
+    print(f"  Network:  http://{local_ip}:{_port}  (iPhone access)")
+    print(f"  Frontend: http://localhost:{_front}")
+    print(f"  API docs: http://localhost:{_port}/docs")
     print(f"  Source:   Binance BTCUSDT (highest global volume)")
     print("=" * 60)
     print("  NOT FINANCIAL ADVICE — For informational purposes only")
@@ -738,10 +741,11 @@ async def startup_event():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    port = int(os.environ.get("BACKEND_PORT", 8000))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         reload=False,
         log_level="info",
     )

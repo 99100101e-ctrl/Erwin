@@ -6,7 +6,7 @@
  */
 import { useState, useEffect, useRef } from 'react';
 
-const API_URL = 'http://localhost:8000/api/state';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/state';
 const POLL_MS  = 3000;
 
 export function useWebSocket() {
