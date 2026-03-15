@@ -146,8 +146,10 @@ class SignalEngine:
                     "SuperTrend DOWN — BUY bloqué malgré EMA bull (retournement récent)"
                 )
 
-        if 0 <= utc_hour < 6:
-            suppress_reasons.append("Low-volume window (00:00–06:00 UTC)")
+        if 16 <= utc_hour <= 18:
+            suppress_reasons.append(
+                "US Open volatile (16h-18h UTC) — 18% WR historique, algos institutionnels"
+            )
 
         if volatility_extreme and score >= 60:
             suppress_reasons.append(f"Extreme volatility (ATR {atr_pct:.2f}%)")
