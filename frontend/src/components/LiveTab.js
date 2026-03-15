@@ -258,6 +258,9 @@ export default function LiveTab({ data, priceDirection }) {
             <div className="text-[10px] text-green-400 uppercase tracking-wide mb-1">TP1 — 40%</div>
             <div className="font-bold text-green-400">${fmt(signal.tp1)}</div>
             <div className="text-xs text-gray-500">+{signal.tp1_pct}%</div>
+            {signal.breakeven_after_tp1 && (
+              <div className="text-[9px] text-yellow-400 mt-1">⚡ Déplacer SL au BE dès TP1</div>
+            )}
           </div>
           <div className="glass-card p-3">
             <div className="text-[10px] text-green-300 uppercase tracking-wide mb-1">TP2 — 35%</div>

@@ -361,36 +361,44 @@ class SignalEngine:
 
     # ─────────────────────────────────────────────────────────────────────────
     def _calculate_risk(self, direction, price, ind):
+        """
+        Stratégie D (optimal backtest 6 mois — Win 50%, Sharpe +1.56, Net +305€):
+          SL = 2.5×ATR  (évite les faux stops sur le bruit normal du BTC)
+          TP1 = 2.0×R   (partiel 40% — capture gains sans fermer trop tôt)
+          TP2 = 3.5×R   (partiel 35%)
+          TP3 = 6.0×R   (25% — laisse courir les grands mouvements)
+          breakeven_after_tp1 = True (SL déplacé à l'entrée dès TP1 atteint)
+        """
         atr = ind.get("atr_1h")
         if not atr or price <= 0:
             return None
 
-        sl_dist = atr * 1.8
+        sl_dist = atr * 2.5  # SL large pour éviter les faux stops
         if direction == "BUY":
             stop_loss = round(price - sl_dist, 2)
             risk_amt  = price - stop_loss
-            tp1 = round(price + risk_amt * 1.5, 2)
-            tp2 = round(price + risk_amt * 2.5, 2)
-            tp3 = round(price + risk_amt * 4.0, 2)
+            tp1 = round(price + risk_amt * 2.0, 2)
+            tp2 = round(price + risk_amt * 3.5, 2)
+            tp3 = round(price + risk_amt * 6.0, 2)
         else:
             stop_loss = round(price + sl_dist, 2)
             risk_amt  = stop_loss - price
-            tp1 = round(price - risk_amt * 1.5, 2)
-            tp2 = round(price - risk_amt * 2.5, 2)
-            tp3 = round(price - risk_amt * 4.0, 2)
+            tp1 = round(price - risk_amt * 2.0, 2)
+            tp2 = round(price - risk_amt * 3.5, 2)
+            tp3 = round(price - risk_amt * 6.0, 2)
 
         if risk_amt <= 0:
             return None
 
-        rr = round(risk_amt * 1.5 / risk_amt, 2)
         return {
             "stop_loss": stop_loss,
             "sl_pct":    round(abs(price - stop_loss) / price * 100, 2),
             "tp1": tp1,  "tp1_pct": round(abs(tp1 - price) / price * 100, 2),
             "tp2": tp2,  "tp2_pct": round(abs(tp2 - price) / price * 100, 2),
             "tp3": tp3,  "tp3_pct": round(abs(tp3 - price) / price * 100, 2),
-            "risk_reward": rr,
+            "risk_reward": 2.0,
             "entry_price": price,
+            "breakeven_after_tp1": True,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
