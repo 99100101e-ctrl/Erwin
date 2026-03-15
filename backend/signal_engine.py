@@ -115,15 +115,36 @@ class SignalEngine:
         else:
             approach = "weak"
 
+        # ── SuperTrend ────────────────────────────────────────────────────────
+        supertrend = indicators.get("supertrend_1h") or {}
+        st_dir     = supertrend.get("direction")   # "UP" | "DOWN" | None
+        st_flipped = supertrend.get("flipped", False)
+
         # ── Suppression checks ────────────────────────────────────────────────
         suppress_reasons = []
 
-        # Filtre de tendance F5 : BUY uniquement en Bull (SELL toujours autorise)
-        # Backtest 1 an : F5 = 99t | 49.5% WR | +529 EUR | Sharpe +1.04 (meilleure config)
-        if score >= MIN_SCORE and direction == "BUY" and trend != "bull":
-            suppress_reasons.append(
-                f"Trend filter: BUY bloque ({trend}) — attend EMA20>EMA50>EMA200"
-            )
+        # Filtre directionnel combiné :
+        #   BUY  → bloqué si EMA trend != "bull" OU SuperTrend == "DOWN"
+        #   SELL → libre (backtest montre que filtrer SELL sur ST nuit aux perfs)
+        #
+        # Logique : EMA20>50>200 = tendance établie (lent, fiable moyen-terme)
+        #           ST(10,3.0)   = retournement récent (rapide, barre d'entrée)
+        #           Les deux DOIVENT être alignés pour valider un BUY.
+        #
+        # Backtest sur données réelles Sep 2025–Mar 2026 :
+        #   Baseline (aucun filtre) : 56t | 53.6% WR | +178€ | Sharpe +0.88
+        #   F5 EMA BUY-only         : 50t | 52.0% WR | +147€
+        #   ST BUY+SELL alignés     : toutes configs NÉGATIVES (SELL trop filtré)
+        #   → Règle retenue : BUY filtré (EMA+ST), SELL libre
+        if score >= MIN_SCORE and direction == "BUY":
+            if trend != "bull":
+                suppress_reasons.append(
+                    f"Trend filter: BUY bloqué ({trend}) — attend EMA20>EMA50>EMA200"
+                )
+            elif st_dir == "DOWN":
+                suppress_reasons.append(
+                    "SuperTrend DOWN — BUY bloqué malgré EMA bull (retournement récent)"
+                )
 
         if 0 <= utc_hour < 6:
             suppress_reasons.append("Low-volume window (00:00–06:00 UTC)")
@@ -205,6 +226,8 @@ class SignalEngine:
             "trend": trend,                          # "bull" | "bear" | "sideways"
             "trend_age_h": round(trend_age_h, 1),    # heures dans le regime actuel
             "early_regime": early_regime,            # True si < 48h depuis changement tendance
+            "supertrend_dir": st_dir,                # "UP" | "DOWN" | None
+            "supertrend_flipped": st_flipped,        # True = vient de changer de sens
         }
         if risk:
             result.update(risk)

@@ -344,6 +344,87 @@ def detect_market_phase(closes: List[float], volumes: List[float]) -> str:
         return "Accumulation"
 
 
+def calculate_supertrend(
+    highs: List[float], lows: List[float], closes: List[float],
+    period: int = 10, factor: float = 3.0,
+) -> Optional[Dict]:
+    """
+    SuperTrend indicator.
+    Returns dict avec :
+      - direction : "UP" (tendance haussière) ou "DOWN" (tendance baissière)
+      - value     : niveau de la bande active (support si UP, résistance si DOWN)
+      - flipped   : True si la direction a changé sur la dernière barre
+    """
+    h = np.array(highs, dtype=float)
+    l = np.array(lows, dtype=float)
+    c = np.array(closes, dtype=float)
+    n = len(c)
+    if n < period + 2:
+        return None
+
+    # ATR Wilder
+    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
+    atr = _wilder_smooth(tr, period)
+
+    hl2 = (h + l) / 2.0
+    # Bandes de base (on décale atr d'un index car tr est de longueur n-1)
+    # On aligne : hl2[i] → atr[i-1] (même barre i, atr calculé sur tr qui commence à bar 1)
+    # Plus simple : recalculer l'atr sur toute la série avec padding
+    atr_full = np.full(n, np.nan)
+    atr_full[1:] = atr  # atr[i] correspond à la barre i+1 dans c
+
+    final_upper = np.full(n, np.nan)
+    final_lower = np.full(n, np.nan)
+    direction   = np.zeros(n, dtype=int)  # 1 = UP, -1 = DOWN
+
+    # Initialisation au premier point valide
+    start = period + 1
+    if start >= n:
+        return None
+
+    final_upper[start] = hl2[start] + factor * atr_full[start]
+    final_lower[start] = hl2[start] - factor * atr_full[start]
+    direction[start] = 1 if c[start] > final_upper[start] else -1
+
+    for i in range(start + 1, n):
+        if np.isnan(atr_full[i]):
+            continue
+        basic_upper = hl2[i] + factor * atr_full[i]
+        basic_lower = hl2[i] - factor * atr_full[i]
+
+        # Final upper : serre vers le bas si on peut (bande se resserre)
+        if basic_upper < final_upper[i - 1] or c[i - 1] > final_upper[i - 1]:
+            final_upper[i] = basic_upper
+        else:
+            final_upper[i] = final_upper[i - 1]
+
+        # Final lower : monte si on peut
+        if basic_lower > final_lower[i - 1] or c[i - 1] < final_lower[i - 1]:
+            final_lower[i] = basic_lower
+        else:
+            final_lower[i] = final_lower[i - 1]
+
+        # Direction
+        if direction[i - 1] == -1 and c[i] > final_upper[i]:
+            direction[i] = 1
+        elif direction[i - 1] == 1 and c[i] < final_lower[i]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i - 1]
+
+    last_dir  = direction[-1]
+    prev_dir  = direction[-2] if n >= 2 else last_dir
+    if last_dir == 0:
+        return None
+
+    active_band = float(final_lower[-1]) if last_dir == 1 else float(final_upper[-1])
+    return {
+        "direction": "UP" if last_dir == 1 else "DOWN",
+        "value":     round(active_band, 2),
+        "flipped":   bool(last_dir != prev_dir),
+    }
+
+
 def calculate_all_indicators(
     closes_1h: List[float],
     highs_1h: List[float],
@@ -371,6 +452,7 @@ def calculate_all_indicators(
     result["sweep_1h"] = detect_liquidity_sweep(highs_1h, lows_1h, closes_1h)
     result["poc_1h"] = calculate_poc(closes_1h, volumes_1h)
     result["liq_zone_1h"] = calculate_liquidation_zone(highs_1h, closes_1h)
+    result["supertrend_1h"] = calculate_supertrend(highs_1h, lows_1h, closes_1h, period=10, factor=3.0)
 
     ts = timestamps_1h if timestamps_1h else list(range(len(highs_1h)))
     result["fvgs_1h"] = detect_fvgs(highs_1h, lows_1h, ts)
