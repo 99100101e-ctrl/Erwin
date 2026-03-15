@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 
 MIN_SCORE = 70          # seuil minimum pour un signal actionnable
-EARLY_REGIME_H = 48    # heures avant qu'un nouveau regime soit considere etabli
+EARLY_REGIME_H = 48    # info UI : nb heures pour qu'un regime soit considere etabli (pas de filtre actif)
 
 
 class SignalEngine:
@@ -118,22 +118,11 @@ class SignalEngine:
         # ── Suppression checks ────────────────────────────────────────────────
         suppress_reasons = []
 
-        # Filtre de tendance : BUY uniquement en Bull, SELL uniquement en Bear
-        if score >= MIN_SCORE:
-            if direction == "BUY" and trend != "bull":
-                suppress_reasons.append(
-                    f"Trend filter: BUY bloque ({trend}) — attend EMA20>EMA50>EMA200"
-                )
-            elif direction == "SELL" and trend != "bear":
-                suppress_reasons.append(
-                    f"Trend filter: SELL bloque ({trend}) — attend EMA20<EMA50<EMA200"
-                )
-
-        # Filtre debut de regime : attendre 48h apres un changement de tendance
-        if score >= MIN_SCORE and early_regime and not suppress_reasons:
-            h_left = int(EARLY_REGIME_H - trend_age_h)
+        # Filtre de tendance F5 : BUY uniquement en Bull (SELL toujours autorise)
+        # Backtest 1 an : F5 = 99t | 49.5% WR | +529 EUR | Sharpe +1.04 (meilleure config)
+        if score >= MIN_SCORE and direction == "BUY" and trend != "bull":
             suppress_reasons.append(
-                f"Debut de regime {trend} ({trend_age_h:.0f}h/{EARLY_REGIME_H}h) — attendre {h_left}h"
+                f"Trend filter: BUY bloque ({trend}) — attend EMA20>EMA50>EMA200"
             )
 
         if 0 <= utc_hour < 6:
