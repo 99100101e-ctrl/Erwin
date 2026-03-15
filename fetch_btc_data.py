@@ -20,9 +20,9 @@ INTERVAL = "1h"
 LIMIT    = 1000  # max Binance
 OUTPUT   = os.path.join(os.path.dirname(__file__), "backend", "data", "btc_1h_real.json")
 
-# 6 mois en arrière depuis aujourd'hui
+# 2 ans en arrière depuis aujourd'hui
 end_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
-start_ms = int((datetime.now(timezone.utc) - timedelta(days=183)).timestamp() * 1000)
+start_ms = int((datetime.now(timezone.utc) - timedelta(days=730)).timestamp() * 1000)
 
 def fetch_klines(start, end):
     url = (
@@ -37,7 +37,7 @@ def main():
     os.makedirs(os.path.dirname(OUTPUT), exist_ok=True)
     all_candles = []
     cur = start_ms
-    print(f"Téléchargement BTCUSDT 1h de {datetime.fromtimestamp(start_ms/1000, tz=timezone.utc).date()} "
+    print(f"Téléchargement BTCUSDT 1h (2 ans) de {datetime.fromtimestamp(start_ms/1000, tz=timezone.utc).date()} "
           f"à {datetime.fromtimestamp(end_ms/1000, tz=timezone.utc).date()}...")
 
     while cur < end_ms:
