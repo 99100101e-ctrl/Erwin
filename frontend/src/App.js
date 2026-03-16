@@ -115,7 +115,7 @@ export default function App() {
       <div className="flex items-center justify-between px-4 py-1 bg-[#0f0f1a] text-xs">
         <span className="text-gray-500">BTC Advisor</span>
         <span className="ml-2 px-2 py-0.5 rounded text-[10px] font-semibold bg-[#F7931A]/10 text-[#F7931A] border border-[#F7931A]/30">
-          Stratégie E · F5
+          BTC62WR · EMA100D
         </span>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${
