@@ -6,9 +6,9 @@ Config exacte du bot actuel :
   - EMA100 daily aligné (BUY si bull, SELL si bear)
   - ADX 1h > 25
   - Heures FR : 8h-21h UTC, hors US open (16h-18h)
-  - RSI 4h : BUY si RSI4h < 50, SELL si RSI4h > 50
   - SL × 2.0 | TP1=1.0xR | TP2=2.5xR | TP3=5.0xR
   - Cooldown 2h
+  (RSI 4h retiré : trop restrictif, de 54 → 8 trades sur 2 ans)
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
