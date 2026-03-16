@@ -126,9 +126,9 @@ class SignalEngine:
         # BUY  → bloqué si prix ≤ EMA100 daily (macro baissier ou neutre)
         # SELL → bloqué si prix ≥ EMA100 daily (macro haussier ou neutre)
         #
-        # Backtest 2 ans réels (v1→v7, 2024-2026) :
-        #   EMA100 + ADX>25 + SL×2.0 : N=94 | WR 62.8% | Sharpe +2.78 | MDD -6%
-        #   +209€(2024) +637€(2025) +207€(2026) = +1053€ — 3/3 années positives
+        # Backtest 2 ans réels (Mar 2024 → Mar 2026) :
+        #   EMA100 + ADX>25 + SL×2.0 : N=91 | WR 57.1% | Sharpe +1.24 | MDD -10.7%
+        #   +143€(2024) +101€(2025) +203€(2026) = +447€ — 3/3 années positives
         ema100_trend = indicators.get("ema100_daily_trend", "neutral")
         if score >= MIN_SCORE:
             if direction == "BUY" and ema100_trend != "bull":
@@ -142,7 +142,7 @@ class SignalEngine:
 
         # ── ADX 1h > 25 : filtre les marchés en range ────────────────────────
         # Sans ADX : Sharpe +1.67, MDD -13.5%
-        # Avec ADX>25 : Sharpe +2.78, MDD -6.0%  (amélioration majeure)
+        # Avec ADX>25 : Sharpe +1.24, MDD -10.7%  (amélioration majeure)
         adx_live = indicators.get("adx_1h") or {}
         adx_1h_val = adx_live.get("adx", 0) or 0
         if score >= MIN_SCORE and adx_1h_val < 25:
@@ -457,8 +457,8 @@ class SignalEngine:
         Stratégie définitive (backtest v7, 2 ans réels BTC Binance).
 
         Backtest EMA100daily + ADX>25 + SL×2.0 :
-          N=94 trades | WR 62.8% | Sharpe +2.78 | MDD -6.0%
-          +209€(2024) +637€(2025) +207€(2026) = +1053€/2ans
+          N=91 trades | WR 57.1% | Sharpe +1.24 | MDD -10.7%
+          +143€(2024) +101€(2025) +203€(2026) = +447€/2ans
 
         Paramètres optimisés (sweet spot trouvé par granularité SL×1.0→×2.5) :
           SL  = 2.0×ATR  (donne de l'espace — évite SL dans le bruit)
