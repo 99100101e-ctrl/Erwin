@@ -450,6 +450,28 @@ async def update_indicators_and_signal():
             }
             state["trend_1d"] = _assess_trend(emas_1d, closes_1d[-1])
 
+        # ── EMA100 daily macro filter ────────────────────────────────────────
+        # Stratégie définitive (backtest v7, 2 ans réels) :
+        #   BUY  si prix > EMA100 daily × 1.001
+        #   SELL si prix < EMA100 daily × 0.999
+        #   Neutral (±0.1%) → pas de trade
+        #   Résultats : WR 62.8%, Sharpe +2.78, MDD -6%, +1053€ / 2 ans
+        if len(closes_1d) >= 100:
+            ema100_1d = _ema_last(closes_1d, 100)
+            price_1d  = closes_1d[-1]
+            if ema100_1d:
+                if price_1d > ema100_1d * 1.001:
+                    indicators["ema100_daily_trend"] = "bull"
+                elif price_1d < ema100_1d * 0.999:
+                    indicators["ema100_daily_trend"] = "bear"
+                else:
+                    indicators["ema100_daily_trend"] = "neutral"
+            else:
+                indicators["ema100_daily_trend"] = "neutral"
+        else:
+            indicators["ema100_daily_trend"] = "neutral"
+            log.info(f"EMA100 daily: pas assez de bougies ({len(closes_1d)}/100)")
+
         # 15m trend: compare last close vs 4-bar-ago close (approximate)
         if len(closes_1h) >= 5:
             state["trend_15m"] = "Bullish" if closes_1h[-1] > closes_1h[-5] else "Bearish"

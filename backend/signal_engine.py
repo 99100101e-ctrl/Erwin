@@ -123,28 +123,33 @@ class SignalEngine:
         # ── Suppression checks ────────────────────────────────────────────────
         suppress_reasons = []
 
-        # Filtre directionnel combiné :
-        #   BUY  → bloqué si EMA trend != "bull" OU SuperTrend == "DOWN"
-        #   SELL → libre (backtest montre que filtrer SELL sur ST nuit aux perfs)
+        # ── Filtre macro EMA100 daily (stratégie définitive v7) ──────────────
+        # BUY  → bloqué si prix ≤ EMA100 daily (macro baissier ou neutre)
+        # SELL → bloqué si prix ≥ EMA100 daily (macro haussier ou neutre)
         #
-        # Logique : EMA20>50>200 = tendance établie (lent, fiable moyen-terme)
-        #           ST(10,3.0)   = retournement récent (rapide, barre d'entrée)
-        #           Les deux DOIVENT être alignés pour valider un BUY.
-        #
-        # Backtest sur données réelles Sep 2025–Mar 2026 :
-        #   Baseline (aucun filtre) : 56t | 53.6% WR | +178€ | Sharpe +0.88
-        #   F5 EMA BUY-only         : 50t | 52.0% WR | +147€
-        #   ST BUY+SELL alignés     : toutes configs NÉGATIVES (SELL trop filtré)
-        #   → Règle retenue : BUY filtré (EMA+ST), SELL libre
-        if score >= MIN_SCORE and direction == "BUY":
-            if trend != "bull":
+        # Backtest 2 ans réels (v1→v7, 2024-2026) :
+        #   EMA100 + ADX>25 + SL×2.0 : N=94 | WR 62.8% | Sharpe +2.78 | MDD -6%
+        #   +209€(2024) +637€(2025) +207€(2026) = +1053€ — 3/3 années positives
+        ema100_trend = indicators.get("ema100_daily_trend", "neutral")
+        if score >= MIN_SCORE:
+            if direction == "BUY" and ema100_trend != "bull":
                 suppress_reasons.append(
-                    f"Trend filter: BUY bloqué ({trend}) — attend EMA20>EMA50>EMA200"
+                    f"Macro EMA100d '{ema100_trend}' — BUY bloqué (prix sous EMA100 daily)"
                 )
-            elif st_dir == "DOWN":
+            elif direction == "SELL" and ema100_trend != "bear":
                 suppress_reasons.append(
-                    "SuperTrend DOWN — BUY bloqué malgré EMA bull (retournement récent)"
+                    f"Macro EMA100d '{ema100_trend}' — SELL bloqué (prix sur EMA100 daily)"
                 )
+
+        # ── ADX 1h > 25 : filtre les marchés en range ────────────────────────
+        # Sans ADX : Sharpe +1.67, MDD -13.5%
+        # Avec ADX>25 : Sharpe +2.78, MDD -6.0%  (amélioration majeure)
+        adx_live = indicators.get("adx_1h") or {}
+        adx_1h_val = adx_live.get("adx", 0) or 0
+        if score >= MIN_SCORE and adx_1h_val < 25:
+            suppress_reasons.append(
+                f"ADX 1h {adx_1h_val:.1f} < 25 — marché en range (signal peu fiable)"
+            )
 
         if 16 <= utc_hour <= 18:
             suppress_reasons.append(
@@ -254,6 +259,8 @@ class SignalEngine:
             "early_regime": early_regime,            # True si < 48h depuis changement tendance
             "supertrend_dir": st_dir,                # "UP" | "DOWN" | None
             "supertrend_flipped": st_flipped,        # True = vient de changer de sens
+            "ema100_daily_trend": ema100_trend,      # "bull" | "bear" | "neutral"
+            "adx_1h_val": round(adx_1h_val, 1),     # valeur ADX 1h courante
         }
         if risk:
             result.update(risk)
@@ -489,28 +496,25 @@ class SignalEngine:
     # ─────────────────────────────────────────────────────────────────────────
     def _calculate_risk(self, direction, price, ind):
         """
-        Stratégie E (optimale — backtest 6 mois comparatif, 6 stratégies).
+        Stratégie définitive (backtest v7, 2 ans réels BTC Binance).
 
-        Résultats vs baseline A (SL=1.8xATR, TP1=1.5xR, pas de BE) :
-          Win rate  : 65.4% vs 46.2%   (+19.2 pts)
-          Sharpe    : +2.37 vs +1.73   (+37%)
-          Net P&L   : +341E vs +281E   (+21%, base 1000E/trade)
-          Max DD    : -4.4% vs -4.4%   (identique)
-          SL touche : 35%   vs 62%     (-27 pts)
+        Backtest EMA100daily + ADX>25 + SL×2.0 :
+          N=94 trades | WR 62.8% | Sharpe +2.78 | MDD -6.0%
+          +209€(2024) +637€(2025) +207€(2026) = +1053€/2ans
 
-        Parametres :
-          SL = 1.8xATR   (inchange)
-          TP1 = 1.0xR    (rapproche — capture gain partiel tot, declanche BE immediat)
-          TP2 = 2.5xR    (inchange)
-          TP3 = 5.0xR    (inchange — laisse courir les grands mouvements)
+        Paramètres optimisés (sweet spot trouvé par granularité SL×1.0→×2.5) :
+          SL  = 2.0×ATR  (donne de l'espace — évite SL dans le bruit)
+          TP1 = 1.0×R    (=ATR×2.0 — déclenche BE immédiatement)
+          TP2 = 2.5×R    (=ATR×5.0)
+          TP3 = 5.0×R    (=ATR×10.0 — laisse courir les grands mouvements)
           breakeven_after_tp1 = True
-          Repartition : 40% a TP1 | 35% a TP2 | 25% a TP3
+          Répartition : 40% à TP1 | 35% à TP2 | 25% à TP3
         """
         atr = ind.get("atr_1h")
         if not atr or price <= 0:
             return None
 
-        sl_dist = atr * 1.8
+        sl_dist = atr * 2.0
         if direction == "BUY":
             stop_loss = round(price - sl_dist, 2)
             risk_amt  = price - stop_loss
