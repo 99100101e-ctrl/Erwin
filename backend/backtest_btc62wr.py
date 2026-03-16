@@ -1,20 +1,19 @@
 """
-Backtest BTC62WR — Confirmation stratégie live
-===============================================
-Reproduit EXACTEMENT les filtres du signal_engine.py actuel :
+Backtest BTC62WR — Comparaison configurations
+==============================================
+Teste toutes les combinaisons de filtres pour trouver
+la config optimale à implémenter dans le bot live.
 
-  1. Score ≥ 70          (seuil signal actionnable)
-  2. EMA100 daily aligné (BUY si prix > EMA100d, SELL si prix < EMA100d)
-  3. ADX 1h > 25         (marché en tendance, pas en range)
-  4. Cooldown 2h         (pas deux signaux dans la même direction < 2h)
-  5. SL = 2.0 × ATR
-     TP1 = 1.0 × R  → 40% de la position + déplace SL au BE
-     TP2 = 2.5 × R  → 35%
-     TP3 = 5.0 × R  → 25%
+Base commune :
+  - Score ≥ 70
+  - EMA100 daily aligné
+  - ADX 1h > 25
+  - SL × 2.0 | TP1=1.0xR | TP2=2.5xR | TP3=5.0xR
+  - Cooldown 2h
 
-Résultats attendus (sur 2 ans réels BTC Binance) :
-  N=94 | WR 62.8% | Sharpe +2.78 | MDD -6.0%
-  +209€ (2024) | +637€ (2025) | +207€ (2026) = +1053€ total
+Filtres additionnels testés :
+  - RSI 4h (BUY si RSI4h < 50, SELL si RSI4h > 50)
+  - Heures FR (8h-21h UTC, hors 16h-18h)
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
@@ -27,12 +26,41 @@ from backtest_2ans import (
 from backtest_v2 import enrich_signals
 from backtest_v6 import enrich_v6, run_v6
 from datetime import datetime, timezone
+from collections import defaultdict
+
+FR_HOURS = set(range(8, 22)) - {16, 17, 18}   # 8h-21h UTC hors US open
+
+
+def run_btc62wr(candles, sigs, rsi4=False, fr_hours=False, **kwargs):
+    """run_v6 avec filtre heures FR optionnel."""
+    if not fr_hours:
+        return run_v6(candles, sigs, rsi4_filter=rsi4, **kwargs)
+
+    # Filtre heures FR en post-processing sur run_v6
+    base = run_v6(candles, sigs, rsi4_filter=rsi4, **kwargs)
+    return [t for t in base if t.get("hour", 0) in FR_HOURS]
+
+
+def print_monthly(candles, trades, label):
+    if not trades:
+        return
+    print(f"\n  P&L mensuel — {label}")
+    monthly = defaultdict(list)
+    for t in trades:
+        dt = datetime.fromtimestamp(candles[t["idx"]]["ts"], tz=timezone.utc)
+        monthly[(dt.year, dt.month)].append(t["pnl_eur"])
+    for (yr, mo), pnls in sorted(monthly.items()):
+        wr  = sum(1 for p in pnls if p > 0) / len(pnls) * 100
+        net = sum(pnls)
+        bar = "█" * int(abs(net) / 30)
+        sign = "+" if net >= 0 else ""
+        print(f"  {yr}-{mo:02d} | N={len(pnls):2d} | WR {wr:4.0f}% | {sign}{net:+6.0f}€ | {bar}")
 
 
 def main():
     print("\n" + "=" * 80)
-    print("  BACKTEST BTC62WR — Confirmation stratégie live")
-    print("  Filtres : EMA100 daily + ADX>25 + SL×2.0 + cooldown 2h")
+    print("  BACKTEST BTC62WR — Recherche config optimale")
+    print("  Base : EMA100 daily + ADX>25 + SL×2.0 + cooldown 2h")
     print("=" * 80)
 
     candles = load_real_candles()
@@ -43,106 +71,76 @@ def main():
         print("  ⚠️  ATTENTION : moins de 1.5 an de données.")
         print("     Lance fetch_btc_data.py sur Windows pour obtenir 2 ans.\n")
 
-    # ── Génération des signaux ──────────────────────────────────────────────
     sigs_base = precompute_full(candles)
     sigs_v2   = enrich_signals(candles, sigs_base)
     sigs      = enrich_v6(candles, sigs_v2)
 
-    mk = {"wr": 0.0, "sh": -999.0}
-
-    # ── Stratégie BTC62WR (live) ────────────────────────────────────────────
-    LIVE_CONFIG = dict(
-        thresh       = 70,
-        adx1h_min    = 25,
-        sl_mult      = 2.0,
-        cooldown_h   = 2,
-        macro_field  = "ema100_trend",
-        macro_mode   = "aligned",
+    BASE = dict(
+        thresh      = 70,
+        adx1h_min   = 25,
+        sl_mult     = 2.0,
+        cooldown_h  = 2,
+        macro_field = "ema100_trend",
+        macro_mode  = "aligned",
     )
 
-    t_live = run_v6(candles, sigs, **LIVE_CONFIG)
+    mk = {"wr": 0.0, "sh": -999.0}
 
-    # ── Résumé principal ────────────────────────────────────────────────────
-    section("★ BTC62WR — Stratégie live (EMA100d + ADX>25 + SL×2.0)")
+    # ── Tableau comparatif ──────────────────────────────────────────────────
+    section("COMPARAISON DES CONFIGS — EMA100 + ADX>25 + SL×2.0")
     print(HDR)
-    row("★★★ BTC62WR (live)", t_live, mk)
 
-    # ── Comparaisons pour contexte ──────────────────────────────────────────
-    section("Comparaisons (contexte)")
-    print(HDR)
-    row("F5 baseline (aucun filtre)",
-        run_v6(candles, sigs), mk)
-    row("ADX>25 seul (sans EMA100d)",
-        run_v6(candles, sigs, adx1h_min=25, sl_mult=2.0), mk)
-    row("EMA100d seul (sans ADX)",
-        run_v6(candles, sigs, sl_mult=2.0,
-               macro_field="ema100_trend", macro_mode="aligned"), mk)
-    row("BTC62WR BUY only (macro BULL)",
-        run_v6(candles, sigs, adx1h_min=25, sl_mult=2.0,
-               macro_field="ema100_trend", macro_mode="bull"), mk)
-    row("BTC62WR SELL only (macro BEAR)",
-        run_v6(candles, sigs, adx1h_min=25, sl_mult=2.0,
-               macro_field="ema100_trend", macro_mode="bear"), mk)
+    configs = [
+        ("Sans filtre extra (live actuel)",        dict(rsi4=False, fr_hours=False)),
+        ("+ RSI 4h",                               dict(rsi4=True,  fr_hours=False)),
+        ("+ Heures FR (8h-21h)",                   dict(rsi4=False, fr_hours=True)),
+        ("+ RSI 4h + Heures FR  ← config origine", dict(rsi4=True,  fr_hours=True)),
+    ]
 
-    # ── Breakdown annuel ────────────────────────────────────────────────────
+    results = {}
+    for label, extra in configs:
+        t = run_btc62wr(candles, sigs, **extra, **BASE)
+        row(label, t, mk)
+        results[label] = t
+
+    # ── Breakdown annuel pour chaque config ─────────────────────────────────
     print(f"\n{SEP}")
-    print("  ▶ BREAKDOWN ANNUEL — BTC62WR")
+    print("  ▶ BREAKDOWN ANNUEL PAR CONFIG")
     print(SEP)
-    yearly_breakdown(candles, t_live, "BTC62WR live")
+    for label, extra in configs:
+        yearly_breakdown(candles, results[label], label)
 
-    # ── Raisons de sortie ───────────────────────────────────────────────────
-    print()
-    exit_reasons(t_live, "BTC62WR live")
-
-    # ── Détail trades BUY / SELL ────────────────────────────────────────────
-    buys  = [t for t in t_live if t["direction"] == "BUY"]
-    sells = [t for t in t_live if t["direction"] == "SELL"]
-    s_all  = stats(t_live)
-    s_buy  = stats(buys)
-    s_sell = stats(sells)
+    # ── Détail de la meilleure config ───────────────────────────────────────
+    best_label = max(results, key=lambda k: (stats(results[k]) or {}).get("sh", -999))
+    best = results[best_label]
+    s = stats(best)
 
     print(f"\n{SEP}")
-    print("  ▶ BUY vs SELL")
+    print(f"  ▶ DÉTAIL — {best_label}")
     print(SEP)
-    print(HDR)
-    if s_buy:
-        row("  BUY  (macro BULL)", buys, mk)
-    else:
-        print("  BUY  : < 3 trades — pas assez de données")
-    if s_sell:
+
+    if s:
+        buys  = [t for t in best if t["direction"] == "BUY"]
+        sells = [t for t in best if t["direction"] == "SELL"]
+        print(HDR)
+        row("  BUY  (macro BULL)", buys,  mk)
         row("  SELL (macro BEAR)", sells, mk)
-    else:
-        print("  SELL : < 3 trades — pas assez de données")
-
-    # ── Distribution mensuelle ──────────────────────────────────────────────
-    if t_live:
-        print(f"\n{SEP}")
-        print("  ▶ P&L MENSUEL")
-        print(SEP)
-        from collections import defaultdict
-        monthly = defaultdict(list)
-        for t in t_live:
-            dt = datetime.fromtimestamp(candles[t["idx"]]["ts"], tz=timezone.utc)
-            monthly[(dt.year, dt.month)].append(t["pnl_eur"])
-        for (yr, mo), pnls in sorted(monthly.items()):
-            wr  = sum(1 for p in pnls if p > 0) / len(pnls) * 100
-            net = sum(pnls)
-            bar = "█" * int(abs(net) / 30)
-            sign = "+" if net >= 0 else ""
-            print(f"  {yr}-{mo:02d} | N={len(pnls):2d} | WR {wr:4.0f}% | {sign}{net:+6.0f}€ | {bar}")
+        print()
+        exit_reasons(best, best_label)
+        print_monthly(candles, best, best_label)
 
     # ── Résumé final ────────────────────────────────────────────────────────
     print(f"\n{'=' * 80}")
-    if s_all:
-        print(f"  ★ BTC62WR — RÉSULTATS FINAUX")
-        print(f"     N trades  : {s_all['n']}")
-        print(f"     Win Rate  : {s_all['wr']:.1f}%")
-        print(f"     Sharpe    : {s_all['sh']:+.2f}")
-        print(f"     MDD       : -{s_all['mdd']*100:.1f}%")
-        print(f"     Net total : {s_all['net_eur']:+.0f}€")
-        print(f"     Avg/trade : {s_all['avg_eur']:+.0f}€")
+    print(f"  ★ MEILLEURE CONFIG : {best_label}")
+    if s:
+        print(f"     N trades  : {s['n']}")
+        print(f"     Win Rate  : {s['wr']:.1f}%")
+        print(f"     Sharpe    : {s['sh']:+.2f}")
+        print(f"     MDD       : -{s['mdd']*100:.1f}%")
+        print(f"     Net total : {s['net_eur']:+.0f}€")
+        print(f"     Avg/trade : {s['avg_eur']:+.0f}€")
     else:
-        print("  ⚠️  Pas assez de trades — télécharge 2 ans de données (fetch_btc_data.py)")
+        print("  ⚠️  Pas assez de trades")
     print(f"{'=' * 80}\n")
 
 
