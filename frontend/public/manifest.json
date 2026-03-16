@@ -1,7 +1,7 @@
 {
-  "name": "BTC Trading Advisor",
-  "short_name": "BTC Advisor",
-  "description": "Real-time Bitcoin trading signals and analysis",
+  "name": "BTC62WR",
+  "short_name": "BTC62WR",
+  "description": "Signaux Bitcoin EMA100 daily + ADX>25 — Stratégie v7",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#1a1a2e",

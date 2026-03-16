@@ -166,9 +166,8 @@ class SignalEngine:
         # ── Risk management ──────────────────────────────────────────────────
         risk = self._calculate_risk(direction, current_price, indicators)
 
-        # Stratégie E : TP1=1.0xR → R/R initial = 1.0, acceptable car BE protège le trade
-        # Le R/R global reste très favorable (TP2=2.5xR, TP3=5.0xR)
-        # R/R non filtrant (non testé en backtest v7 — info seulement)
+        # BTC62WR — Stratégie v7 (EMA100 daily + ADX>25 + SL×2.0)
+        # TP1=1.0xR → déplace SL au BE | TP2=2.5xR | TP3=5.0xR
 
         suppressed = len(suppress_reasons) > 0
 
@@ -500,7 +499,7 @@ class SignalEngine:
             "entry_price": price,
             # Flag pour le frontend et le systeme d'execution
             "breakeven_after_tp1": True,
-            "strategy": "E",
+            "strategy": "BTC62WR",
         }
 
     # ─────────────────────────────────────────────────────────────────────────
