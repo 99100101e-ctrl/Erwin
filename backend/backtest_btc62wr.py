@@ -1,14 +1,14 @@
 """
-Backtest BTC62WR — Confirmation bot live (état restauré v7)
-============================================================
-Config exacte du bot actuel :
+Backtest BTC62WR — Config bot live actuelle
+============================================
+Filtres exacts du bot (signal_engine.py) :
   - Score ≥ 70
   - EMA100 daily aligné (BUY si bull, SELL si bear)
   - ADX 1h > 25
   - Heures FR : 8h-21h UTC, hors US open (16h-18h)
   - SL × 2.0 | TP1=1.0xR | TP2=2.5xR | TP3=5.0xR
   - Cooldown 2h
-  (RSI 4h retiré : trop restrictif, de 54 → 8 trades sur 2 ans)
+  (RSI 4h retiré : réduisait de 54 → 8 trades sur 2 ans)
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
@@ -33,19 +33,16 @@ def run_bot_actuel(candles, sigs,
                    adx1h_min=25,
                    macro_field="ema100_trend",
                    macro_mode="aligned",
-                   rsi4_filter=True,
+                   rsi4_filter=False,
                    fr_hours_filter=True):
     """
     Reproduit exactement les filtres de suppression du bot live (signal_engine.py) :
       1. EMA100 daily aligné (BUY si bull, SELL si bear)
       2. ADX 1h > 25
       3. Heures FR (8h-21h UTC, hors 16h-18h)
-      4. RSI 4h (BUY si RSI4h < 50, SELL si RSI4h > 50)
-      5. Cooldown 2h par direction
+      4. Cooldown 2h par direction
 
-    Les filtres sont appliqués sur les signaux AVANT la simulation du trade,
-    ce qui est fidèle au comportement live (un signal filtré ne déclenche pas
-    de cooldown et ne bloque pas l'entrée suivante).
+    NB : RSI 4h désactivé par défaut (retiré du bot live — trop restrictif).
     """
     trades = []
     end_idx = 0
@@ -80,7 +77,7 @@ def run_bot_actuel(candles, sigs,
             if dt.hour not in FR_HOURS:
                 continue
 
-        # ── Filtre RSI 4h ────────────────────────────────────────────────────
+        # ── Filtre RSI 4h (désactivé par défaut) ─────────────────────────────
         if rsi4_filter and s.get("rsi4") is not None:
             if d == "BUY"  and s["rsi4"] >= 50: continue
             if d == "SELL" and s["rsi4"] <= 50: continue
@@ -125,8 +122,8 @@ def print_monthly(candles, trades, label):
 
 def main():
     print("\n" + "=" * 80)
-    print("  BACKTEST BTC62WR — Confirmation bot live (état restauré v7)")
-    print("  EMA100 daily + ADX>25 + Heures FR + RSI 4h + SL×2.0 + cooldown 2h")
+    print("  BACKTEST BTC62WR — Bot live actuel")
+    print("  EMA100 daily + ADX>25 + Heures FR + SL×2.0 + cooldown 2h")
     print("=" * 80)
 
     candles = load_real_candles()
@@ -150,6 +147,8 @@ def main():
         cooldown_h       = 2,
         macro_field      = "ema100_trend",
         macro_mode       = "aligned",
+        rsi4_filter      = False,   # retiré du bot live
+        fr_hours_filter  = True,
     )
 
     # ── Tableau comparatif : impact de chaque filtre ────────────────────────
@@ -157,20 +156,20 @@ def main():
     print(HDR)
 
     configs = [
-        ("EMA100 + ADX>25 seulement          (base)",  dict(rsi4_filter=False, fr_hours_filter=False)),
-        ("+ Heures FR (8h-21h, hors 16-18h)",          dict(rsi4_filter=False, fr_hours_filter=True)),
-        ("+ RSI 4h seulement",                         dict(rsi4_filter=True,  fr_hours_filter=False)),
-        ("+ Heures FR + RSI 4h  ← BOT ACTUEL",        dict(rsi4_filter=True,  fr_hours_filter=True)),
+        ("EMA100 + ADX>25 seulement          (base)",  dict(fr_hours_filter=False)),
+        ("+ Heures FR (8h-21h, hors 16-18h)  ← BOT ACTUEL", dict(fr_hours_filter=True)),
+        ("+ RSI 4h en plus (retiré — comparaison)",   dict(fr_hours_filter=True,  rsi4_filter=True)),
     ]
 
     results = {}
     for label, extra in configs:
-        t = run_bot_actuel(candles, sigs, **extra, **BASE)
+        cfg = {**BASE, **extra}
+        t = run_bot_actuel(candles, sigs, **cfg)
         row(label, t, mk)
         results[label] = t
 
     # ── Config bot actuel : détail complet ──────────────────────────────────
-    bot_label = "+ Heures FR + RSI 4h  ← BOT ACTUEL"
+    bot_label = "+ Heures FR (8h-21h, hors 16-18h)  ← BOT ACTUEL"
     bot = results[bot_label]
     s   = stats(bot)
 
@@ -200,7 +199,7 @@ def main():
 
     # ── Résumé final ────────────────────────────────────────────────────────
     print(f"\n{'=' * 80}")
-    print("  ★ BOT ACTUEL (EMA100d + ADX>25 + HeuresFR + RSI4h + SL×2.0)")
+    print("  ★ BOT ACTUEL (EMA100d + ADX>25 + HeuresFR + SL×2.0)")
     if s:
         print(f"     N trades  : {s['n']}")
         print(f"     Win Rate  : {s['wr']:.1f}%")
