@@ -101,7 +101,7 @@ def row(label, trades, best):
     if s["wr"] > best.get("wr", 0): best["wr"] = s["wr"]
     if s["sh"] > best.get("sh", -999): best["sh"] = s["sh"]
     print(
-        f"  {label:<55} | {s['n']:>5} | {s['wr']:>5.1f}% | {s['avg_pct']:>+6.2f}% "
+        f"  {label:<55} | {s['n']:>5} | {s['wr']:>5.1f}% | {s['avg']:>+6.2f}% "
         f"| -{s['mdd']*100:>4.1f}% | {s['sh']:>+6.2f} | {s['net_eur']:>+8.0f}€"
         f"{mark_wr}{mark_sh}"
     )
