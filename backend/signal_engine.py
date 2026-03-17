@@ -17,8 +17,6 @@ class SignalEngine:
         self.last_signal_time: Dict[str, float] = {}
         self.signal_history: List[Dict] = []
         self.max_history = 50          # spec: last 50 signals
-        self._pending_signal: Optional[str] = None
-        self._pending_count: int = 0
         self._last_trend: Optional[str] = None   # "bull" | "bear" | "sideways"
         self._trend_since: float = 0.0           # timestamp du debut du regime actuel
 
@@ -95,14 +93,6 @@ class SignalEngine:
         trend_age_h = (now - self._trend_since) / 3600  # heures dans le regime actuel
         early_regime = trend_age_h < EARLY_REGIME_H
 
-        # ── Classify raw signal ──────────────────────────────────────────────
-        if score >= 100:
-            raw_signal = f"STRONG_{direction}"
-        elif score >= MIN_SCORE:
-            raw_signal = f"MODERATE_{direction}"
-        else:
-            raw_signal = "HOLD"
-
         # ── Approach label (shows even while suppressed) ─────────────────────
         if is_titan and score >= 80:
             approach = "titan"
@@ -141,14 +131,14 @@ class SignalEngine:
                     f"Macro EMA100d '{ema100_trend}' — SELL bloqué (prix sur EMA100 daily)"
                 )
 
-        # ── ADX 1h > 25 : filtre les marchés en range ────────────────────────
-        # Sans ADX : Sharpe +1.67, MDD -13.5%
-        # Avec ADX>25 : Sharpe +2.78, MDD -6.0%  (amélioration majeure)
+        # ── ADX 1h >= 20 : filtre les marchés en range ───────────────────────
+        # Backtest 2 ans : ADX>=20 → N=79, WR 58.2%, Sharpe +1.31, +452€
+        #                  ADX>=25 → N=66, WR 57.6%, Sharpe +1.19, +390€
         adx_live = indicators.get("adx_1h") or {}
         adx_1h_val = adx_live.get("adx", 0) or 0
-        if score >= MIN_SCORE and adx_1h_val < 25:
+        if score >= MIN_SCORE and adx_1h_val < 20:
             suppress_reasons.append(
-                f"ADX 1h {adx_1h_val:.1f} < 25 — marché en range (signal peu fiable)"
+                f"ADX 1h {adx_1h_val:.1f} < 20 — marché en range (signal peu fiable)"
             )
 
         if 16 <= utc_hour <= 18:
@@ -165,9 +155,6 @@ class SignalEngine:
                 f"Hors heures françaises ({utc_hour:02d}h UTC) — trading actif 8h-21h UTC"
             )
 
-        if volatility_extreme and score >= 60:
-            suppress_reasons.append(f"Extreme volatility (ATR {atr_pct:.2f}%)")
-
         last_same = self.last_signal_time.get(direction, 0)
         cooldown_remaining = 0
         if (now - last_same) < 2 * 3600 and score >= 60:
@@ -175,26 +162,8 @@ class SignalEngine:
             m, s = divmod(cooldown_remaining, 60)
             suppress_reasons.append(f"Cooldown {m}m{s:02d}s remaining")
 
-        if score >= 100:
-            if self._pending_signal == raw_signal:
-                self._pending_count += 1
-            else:
-                self._pending_signal = raw_signal
-                self._pending_count = 1
-            if self._pending_count < 2:
-                suppress_reasons.append("Awaiting 2nd consecutive confirmation…")
-        else:
-            self._pending_signal = None
-            self._pending_count = 0
-
         # ── Risk management ──────────────────────────────────────────────────
         risk = self._calculate_risk(direction, current_price, indicators)
-
-        # Stratégie E : TP1=1.0xR → R/R initial = 1.0, acceptable car BE protège le trade
-        # Le R/R global reste très favorable (TP2=2.5xR, TP3=5.0xR)
-        min_rr = 0.8
-        if risk and risk.get("risk_reward") and risk["risk_reward"] < min_rr and score >= 60:
-            suppress_reasons.append(f"R/R {risk['risk_reward']:.2f} < {min_rr} minimum")
 
         suppressed = len(suppress_reasons) > 0
 
@@ -218,8 +187,6 @@ class SignalEngine:
         # ── Record to history only for clean (unsuppressed) actionable signals
         if not suppressed and signal_label not in ("HOLD", "WAIT"):
             self.last_signal_time[direction] = now
-            self._pending_signal = None
-            self._pending_count = 0
             self._add_to_history(signal_label, score, current_price, conditions_met)
 
         # ── Build response ────────────────────────────────────────────────────
@@ -481,11 +448,10 @@ class SignalEngine:
     # ─────────────────────────────────────────────────────────────────────────
     def _calculate_risk(self, direction, price, ind):
         """
-        Stratégie définitive (backtest v7, 2 ans réels BTC Binance).
+        Stratégie v8 — backtest 2 ans réels (17 Mar 2024 → 17 Mar 2026).
 
-        Backtest EMA100daily + ADX>25 + SL×2.0 :
-          N=94 trades | WR 62.8% | Sharpe +2.78 | MDD -6.0%
-          +209€(2024) +637€(2025) +207€(2026) = +1053€/2ans
+        Backtest EMA100daily + ADX>=20 + SL×2.0 :
+          N=79 trades | WR 58.2% | Sharpe +1.31 | MDD -10.7% | Net +452€
 
         Paramètres optimisés (sweet spot trouvé par granularité SL×1.0→×2.5) :
           SL  = 2.0×ATR  (donne de l'espace — évite SL dans le bruit)
@@ -526,7 +492,7 @@ class SignalEngine:
             "entry_price": price,
             # Flag pour le frontend et le systeme d'execution
             "breakeven_after_tp1": True,
-            "strategy": "BTC62WR",
+            "strategy": "BTC_ADX20",
         }
 
     # ─────────────────────────────────────────────────────────────────────────
