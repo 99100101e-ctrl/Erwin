@@ -132,13 +132,13 @@ class SignalEngine:
                 )
 
         # ── ADX 1h >= 20 : filtre les marchés en range ───────────────────────
-        # Backtest 2 ans : ADX>=20 → N=79, WR 58.2%, Sharpe +1.31, +452€
-        #                  ADX>=25 → N=66, WR 57.6%, Sharpe +1.19, +390€
+        # Backtest 2 ans : ADX>=25 → N=51, WR 66.7%, Sharpe +2.25, +621€ (meilleur)
+        #                  ADX>=20 → N=64, WR 59.4%, Sharpe +1.70, +500€
         adx_live = indicators.get("adx_1h") or {}
         adx_1h_val = adx_live.get("adx", 0) or 0
-        if score >= MIN_SCORE and adx_1h_val < 20:
+        if score >= MIN_SCORE and adx_1h_val < 25:
             suppress_reasons.append(
-                f"ADX 1h {adx_1h_val:.1f} < 20 — marché en range (signal peu fiable)"
+                f"ADX 1h {adx_1h_val:.1f} < 25 — marché en range (signal peu fiable)"
             )
 
         if 16 <= utc_hour <= 18:
