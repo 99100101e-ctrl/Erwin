@@ -7,17 +7,18 @@ Stratégie validée en backtest sur 2 ans :
   123 trades | WR 58.5% | Sharpe +2.45 | MDD -7.4% | +1067€ (2000€/trade)
 
 DÉMARRAGE RAPIDE :
-  1. Remplis apex_live/config.py (API keys)
-  2. PAPER_TRADING = True  → test sans argent réel (recommandé)
+  1. Remplis apex_live/config.py (Telegram token pour les alertes)
+  2. SIGNAL_ONLY = True  → alerte uniquement, tu décides manuellement (par défaut)
   3. python apex_live/apex_live.py
-  4. Vérifie les logs dans apex_live/apex_live.log
-  5. Quand confiant → PAPER_TRADING = False
+  4. Reçois les alertes et entre en position manuellement sur Binance
+  5. Quand confiant dans les signaux → SIGNAL_ONLY = False, PAPER_TRADING = True
+  6. Puis PAPER_TRADING = False pour le trading réel
 
-FONCTIONNEMENT :
-  • Toutes les heures (à la fermeture d'une bougie 1h), le bot analyse BTC.
-  • Si un signal APEX v2 est détecté → entre en position.
-  • Gère automatiquement : SL, TP1 (40%), TP2 (35%), TP3 (25%), timeout 96h.
-  • En paper trading : simule tout localement, aucun ordre Binance.
+MODES :
+  • SIGNAL_ONLY = True   → bot détecte + alerte (entrée / SL / TP calculés)
+                           tu places les ordres toi-même sur Binance
+  • PAPER_TRADING = True → simulation automatique locale, 0 ordre réel
+  • PAPER_TRADING = False → ordres réels sur Binance Futures (⚠️ argent réel)
 """
 
 import sys, os, json, time, hmac, hashlib, logging, traceback
@@ -314,13 +315,26 @@ def check_signal(candles: list, ind: dict, state: dict):
         if atr_val <= 0:
             continue
 
+        confirm_labels = {
+            "BUY":  ["ATR Squeeze", "Volume Surge", "RSI Zone",
+                     "EMA Stack", "Engulfing", "MACD Cross"],
+            "SELL": ["ATR Squeeze", "Volume Surge", "RSI Zone",
+                     "EMA Stack", "Engulfing"],
+        }
+        confirm_vals = [s1, s2, s3, s4, s5] + ([s6] if direction == "BUY" else [])
+
         return {
-            "direction": direction,
-            "candle_ts": ts,
-            "atr":       atr_val,
-            "score":     score,
-            "adx":       ind["adxs"][i],
-            "rsi":       ind["rsi14"][i],
+            "direction":   direction,
+            "candle_ts":   ts,
+            "candle_close": candles[i]["close"],
+            "atr":         atr_val,
+            "score":       score,
+            "score_max":   6 if direction == "BUY" else 5,
+            "adx":         ind["adxs"][i],
+            "rsi":         ind["rsi14"][i],
+            "rsi4h":       ind["rsi4h"][i] if direction == "BUY" else None,
+            "trend":       ind["trend"][i],
+            "confirmateurs": list(zip(confirm_labels[direction], confirm_vals)),
         }
 
     return None
@@ -384,6 +398,81 @@ def notify(msg: str):
         )
     except Exception:
         pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ALERTE SIGNAL (mode SIGNAL_ONLY)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def send_signal_alert(signal: dict, state: dict):
+    """
+    Envoie une alerte détaillée avec tous les niveaux à placer manuellement.
+    N'entre pas en position — tu décides toi-même.
+    """
+    direction = signal["direction"]
+    atr       = signal["atr"]
+    R         = CFG.SL_MULT * atr
+    entry     = signal["candle_close"]   # prix de clôture de la bougie signal
+
+    if direction == "BUY":
+        sl  = entry - R
+        tp1 = entry + CFG.TP1_R * R
+        tp2 = entry + CFG.TP2_R * R
+        tp3 = entry + CFG.TP3_R * R
+    else:
+        sl  = entry + R
+        tp1 = entry - CFG.TP1_R * R
+        tp2 = entry - CFG.TP2_R * R
+        tp3 = entry - CFG.TP3_R * R
+
+    sign    = 1 if direction == "BUY" else -1
+    pct_sl  = (sl  - entry) / entry * 100
+    pct_tp1 = (tp1 - entry) / entry * 100 * sign
+    pct_tp2 = (tp2 - entry) / entry * 100 * sign
+    pct_tp3 = (tp3 - entry) / entry * 100 * sign
+
+    trend_str = {"bull": "HAUSSIÈRE", "bear": "BAISSIÈRE"}.get(signal["trend"], "neutre")
+    arrow     = "▲" if direction == "BUY" else "▼"
+
+    # Détail confirmateurs
+    conf_lines = []
+    for label, val in signal["confirmateurs"]:
+        conf_lines.append(f"  {'✅' if val else '❌'} {label}")
+    conf_str = "\n".join(conf_lines)
+
+    rsi4h_line = (f"\n  RSI 4h  : {signal['rsi4h']:.1f}"
+                  if signal.get("rsi4h") is not None else "")
+
+    msg = (
+        f"{arrow} SIGNAL APEX v2 — {direction} {CFG.SYMBOL}\n"
+        f"{'─' * 36}\n"
+        f"Bougie : {datetime.fromtimestamp(signal['candle_ts'], tz=timezone.utc).strftime('%Y-%m-%d %H:00')} UTC\n"
+        f"Tendance macro : {trend_str}\n"
+        f"\n"
+        f"NIVEAUX SUGGÉRÉS :\n"
+        f"  Entrée  : {entry:,.1f} $\n"
+        f"  SL      : {sl:,.1f} $  ({pct_sl:+.2f}% | R = {R:.0f} $)\n"
+        f"  TP1     : {tp1:,.1f} $  (+{pct_tp1:.1f}% | {CFG.TP1_R}R → ferme 40%)\n"
+        f"  TP2     : {tp2:,.1f} $  (+{pct_tp2:.1f}% | {CFG.TP2_R}R → ferme 35%)\n"
+        f"  TP3     : {tp3:,.1f} $  (+{pct_tp3:.1f}% | {CFG.TP3_R}R → ferme 25%)\n"
+        f"\n"
+        f"CONFIRMATEURS ({signal['score']}/{signal['score_max']}) :\n"
+        f"{conf_str}\n"
+        f"\n"
+        f"INDICATEURS :\n"
+        f"  ADX     : {signal['adx']:.1f}\n"
+        f"  RSI 14  : {signal['rsi']:.1f}"
+        f"{rsi4h_line}\n"
+        f"  ATR     : {atr:.0f} $\n"
+        f"\n"
+        f"→ Décision manuelle requise."
+    )
+
+    log.info("\n" + "=" * 50 + "\n" + msg + "\n" + "=" * 50)
+    notify(msg)
+
+    # Mettre à jour le cooldown pour éviter une re-alerte sur la même bougie
+    state["last_signal_ts"][direction] = signal["candle_ts"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -670,11 +759,14 @@ def run_cycle(state: dict):
 
         if signal:
             log.info(
-                f"🎯 SIGNAL {signal['direction']} détecté"
-                f" | score={signal['score']} | ADX={signal['adx']:.1f}"
-                f" | RSI={signal['rsi']:.1f}"
+                f"SIGNAL {signal['direction']} détecté"
+                f" | score={signal['score']}/{signal['score_max']}"
+                f" | ADX={signal['adx']:.1f} | RSI={signal['rsi']:.1f}"
             )
-            enter_trade(signal, state)
+            if getattr(CFG, "SIGNAL_ONLY", False):
+                send_signal_alert(signal, state)
+            else:
+                enter_trade(signal, state)
         else:
             log.info("Pas de signal.")
     except Exception as e:
@@ -682,7 +774,13 @@ def run_cycle(state: dict):
 
 
 def main():
-    mode = "PAPER TRADING" if CFG.PAPER_TRADING else "🔴 TRADING RÉEL"
+    signal_only = getattr(CFG, "SIGNAL_ONLY", False)
+    if signal_only:
+        mode = "SIGNAL ONLY (alertes uniquement — pas d'ordres)"
+    elif CFG.PAPER_TRADING:
+        mode = "PAPER TRADING (simulation)"
+    else:
+        mode = "TRADING REEL"
     log.info("=" * 60)
     log.info(f"  APEX Bot v2 — {CFG.SYMBOL} — MODE : {mode}")
     log.info(f"  Taille position : {CFG.TRADE_SIZE_USDT} USDT | Levier : {CFG.LEVERAGE}x")
@@ -690,7 +788,7 @@ def main():
              f" | TP1={CFG.TP1_R}R | TP2={CFG.TP2_R}R | TP3={CFG.TP3_R}R")
     log.info("=" * 60)
 
-    if not CFG.PAPER_TRADING:
+    if not signal_only and not CFG.PAPER_TRADING:
         if not CFG.API_KEY or not CFG.API_SECRET:
             log.error("API_KEY ou API_SECRET manquant dans config.py !")
             sys.exit(1)

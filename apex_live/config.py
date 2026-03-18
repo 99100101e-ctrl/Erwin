@@ -22,7 +22,8 @@ LEVERAGE = 1         # 1 = pas de levier (recommandé pour démarrer)
 TRADE_SIZE_USDT = 2000.0   # Montant par trade en USDT (même que le backtest)
 
 # ── Mode ───────────────────────────────────────────────────────────────────────
-PAPER_TRADING = True       # True = simulation pure | False = ordres réels
+SIGNAL_ONLY   = True       # True = alerte signal uniquement, pas d'ordre (recommandé pour commencer)
+PAPER_TRADING = True       # True = simulation pure | False = ordres réels (ignoré si SIGNAL_ONLY=True)
 
 # ── Paramètres APEX v2 (validés en backtest — NE PAS MODIFIER sans re-backtester)
 BOS_LB     = 20    # Break of Structure lookback
