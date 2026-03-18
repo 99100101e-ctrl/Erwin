@@ -378,6 +378,30 @@ def log_trade(trade: dict):
         f.write(json.dumps(trade) + "\n")
 
 
+def log_signal(signal: dict, sl: float, tp1: float, tp2: float, tp3: float, mode: str):
+    """Enregistre chaque signal détecté dans signals.jsonl (SIGNAL_ONLY + trades)."""
+    entry = {
+        "ts":        int(time.time()),
+        "candle_ts": signal["candle_ts"],
+        "direction": signal["direction"],
+        "entry":     signal["candle_close"],
+        "sl":        round(sl,  1),
+        "tp1":       round(tp1, 1),
+        "tp2":       round(tp2, 1),
+        "tp3":       round(tp3, 1),
+        "score":     signal["score"],
+        "score_max": signal["score_max"],
+        "adx":       round(signal["adx"], 1),
+        "rsi":       round(signal["rsi"], 1),
+        "rsi4h":     round(signal["rsi4h"], 1) if signal.get("rsi4h") else None,
+        "trend":     signal["trend"],
+        "mode":      mode,
+        "confirmateurs": {lbl: bool(v) for lbl, v in signal["confirmateurs"]},
+    }
+    with open(CFG.SIGNALS_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
 def notify(msg: str):
     """Notification Telegram (optionnel)."""
     log.info(f"📢 {msg}")
@@ -463,6 +487,7 @@ def send_signal_alert(signal: dict, state: dict):
 
     log.info("\n" + "=" * 50 + "\n" + msg + "\n" + "=" * 50)
     notify(msg)
+    log_signal(signal, sl, tp1, tp2, tp3, mode="SIGNAL_ONLY")
 
     # Mettre à jour le cooldown pour éviter une re-alerte sur la même bougie
     state["last_signal_ts"][direction] = signal["candle_ts"]
@@ -505,6 +530,9 @@ def enter_trade(signal: dict, state: dict):
         tp3 = entry_price - CFG.TP3_R * R
         side_entry = "SELL"
         side_exit  = "BUY"
+
+    mode = "PAPER" if CFG.PAPER_TRADING else "LIVE"
+    log_signal(signal, sl, tp1, tp2, tp3, mode=mode)
 
     log.info(
         f"▶ ENTRÉE {direction} | Prix {entry_price:.1f} | ATR {atr:.1f} | R {R:.1f}"

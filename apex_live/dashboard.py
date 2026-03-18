@@ -8,10 +8,11 @@ import json, os, time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-STATE_FILE  = "apex_live/state.json"
-LOG_FILE    = "apex_live/trades.jsonl"
-BOT_LOG     = "apex_live/apex_live.log"
-PORT        = 8080
+STATE_FILE   = "apex_live/state.json"
+LOG_FILE     = "apex_live/trades.jsonl"
+SIGNALS_FILE = "apex_live/signals.jsonl"
+BOT_LOG      = "apex_live/apex_live.log"
+PORT         = 8080
 
 
 def _read_state():
@@ -19,6 +20,20 @@ def _read_state():
         return None
     with open(STATE_FILE, "r") as f:
         return json.load(f)
+
+
+def _read_signals(n=50):
+    if not os.path.exists(SIGNALS_FILE):
+        return []
+    with open(SIGNALS_FILE, "r") as f:
+        lines = f.read().strip().splitlines()
+    out = []
+    for line in lines[-n:]:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return list(reversed(out))
 
 
 def _read_trades(n=10):
@@ -63,9 +78,10 @@ def _pnl_color(val):
 
 
 def render_html():
-    state  = _read_state()
-    trades = _read_trades(15)
-    logs   = _read_log(40)
+    state   = _read_state()
+    trades  = _read_trades(15)
+    signals = _read_signals(50)
+    logs    = _read_log(40)
     running = _bot_running()
 
     stats   = state["stats"] if state else {"n": 0, "wins": 0, "pnl_eur": 0.0}
@@ -137,6 +153,54 @@ def render_html():
     else:
         trades_html = "<p style='color:#666;text-align:center;padding:20px'>Aucun trade enregistré</p>"
 
+    # ── Journal signaux ────────────────────────────────────────
+    import html as _html
+    if signals:
+        sig_rows = ""
+        for s in signals:
+            d   = s["direction"]
+            col = "#00e676" if d == "BUY" else "#ff5252"
+            arr = "▲" if d == "BUY" else "▼"
+            mode_badge = {
+                "SIGNAL_ONLY": "<span class='badge-mode sig'>SIGNAL</span>",
+                "PAPER":       "<span class='badge-mode paper'>PAPER</span>",
+                "LIVE":        "<span class='badge-mode live'>LIVE</span>",
+            }.get(s.get("mode",""), s.get("mode",""))
+            trend_icon = "↑" if s.get("trend") == "bull" else "↓"
+            conf = s.get("confirmateurs", {})
+            conf_icons = "".join(
+                f'<span title="{_html.escape(k)}" style="color:{"#00e676" if v else "#333"};font-size:0.9rem">●</span>'
+                for k, v in conf.items()
+            )
+            candle_dt = datetime.fromtimestamp(s["candle_ts"], tz=timezone.utc).strftime("%d/%m %H:00")
+            sig_dt    = datetime.fromtimestamp(s["ts"],        tz=timezone.utc).strftime("%d/%m %H:%M")
+            sig_rows += f"""<tr>
+              <td style="color:{col};font-weight:bold">{arr} {d}</td>
+              <td>{candle_dt}</td>
+              <td style="color:#aaa">{sig_dt}</td>
+              <td>{mode_badge}</td>
+              <td style="color:#fff">{s['entry']:,.0f}</td>
+              <td style="color:#ff5252">{s['sl']:,.0f}</td>
+              <td style="color:#ffab40">{s['tp1']:,.0f}</td>
+              <td style="color:#69f0ae">{s['tp2']:,.0f}</td>
+              <td style="color:#00e676">{s['tp3']:,.0f}</td>
+              <td style="color:#64b5f6">{s['score']}/{s['score_max']}</td>
+              <td style="color:#aaa">{s['adx']:.0f}</td>
+              <td style="color:#aaa">{s['rsi']:.0f}</td>
+              <td style="letter-spacing:2px">{conf_icons}</td>
+            </tr>"""
+        signals_html = f"""
+        <table class="trades-table">
+          <thead><tr>
+            <th>Direction</th><th>Bougie</th><th>Détecté</th><th>Mode</th>
+            <th>Entrée</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
+            <th>Score</th><th>ADX</th><th>RSI</th><th>Conf.</th>
+          </tr></thead>
+          <tbody>{sig_rows}</tbody>
+        </table>"""
+    else:
+        signals_html = "<p style='color:#555;text-align:center;padding:20px'>Aucun signal enregistré — le bot écrira ici dès le premier signal détecté</p>"
+
     # ── Log console ────────────────────────────────────────────
     log_lines = ""
     for line in logs:
@@ -148,8 +212,7 @@ def render_html():
             col = "#555"
         else:
             col = "#aaa"
-        import html
-        log_lines += f'<div style="color:{col}">{html.escape(line)}</div>'
+        log_lines += f'<div style="color:{col}">{_html.escape(line)}</div>'
 
     # ── HTML complet ───────────────────────────────────────────
     pnl_color = _pnl_color(stats["pnl_eur"])
@@ -189,6 +252,12 @@ def render_html():
               font-size:0.75rem; line-height:1.6; height:220px; overflow-y:auto;
               font-family:monospace }}
   .refresh-note {{ color:#444; font-size:0.72rem; text-align:right; margin-top:8px }}
+  .sig-scroll {{ overflow-x:auto }}
+  .badge-mode {{ display:inline-block; border-radius:3px; padding:1px 6px;
+                 font-size:0.7rem; font-weight:bold }}
+  .badge-mode.sig   {{ background:#1a2a3a; color:#64b5f6 }}
+  .badge-mode.paper {{ background:#2a2a1a; color:#ffab40 }}
+  .badge-mode.live  {{ background:#1a2a1a; color:#00e676 }}
 </style>
 </head>
 <body>
@@ -215,6 +284,15 @@ def render_html():
     <h2>Derniers trades</h2>
     {trades_html}
   </div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <h2>Journal des signaux &amp; trades ({len(signals)} entrées)</h2>
+  <p style="color:#555;font-size:0.75rem;margin-bottom:10px">
+    Tous les signaux APEX v2 détectés — SIGNAL = alerte manuelle, PAPER = simulation, LIVE = réel.
+    Les points ● indiquent les confirmateurs actifs (survole pour le nom).
+  </p>
+  <div class="sig-scroll">{signals_html}</div>
 </div>
 
 <div class="card">

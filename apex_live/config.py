@@ -49,5 +49,6 @@ TELEGRAM_TOKEN   = ""   # ex : "7123456789:AAGx..."
 TELEGRAM_CHAT_ID = ""   # ex : "123456789"
 
 # ── Fichiers ───────────────────────────────────────────────────────────────────
-STATE_FILE = "apex_live/state.json"
-LOG_FILE   = "apex_live/trades.jsonl"
+STATE_FILE   = "apex_live/state.json"
+LOG_FILE     = "apex_live/trades.jsonl"
+SIGNALS_FILE = "apex_live/signals.jsonl"
