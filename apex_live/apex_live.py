@@ -25,21 +25,14 @@ import sys, os, json, time, hmac, hashlib, logging, traceback
 from datetime import datetime, timezone
 from collections import defaultdict
 
-# ── Imports indicateurs depuis bots_lab ──────────────────────────────────────
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bots_lab'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
-sys.path.insert(0, os.path.dirname(__file__))
-
-from apex_bot import (
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config as CFG
+from indicators import (
+    FR_HOURS,
     _ema, _rsi, _atr, _adx, _vol_sma, _daily_ema100_trend,
     _bos, _atr_squeeze, _volume_surge, _rsi_zone, _ema_stack, _engulfing,
-    FR_HOURS,
+    _macd, _rsi4h, _ema4h, _macd_cross, _buy_not_extended,
 )
-from apex_bot_v2 import (
-    _macd, _rsi4h as _compute_rsi4h, _ema4h,
-    _macd_cross, _buy_not_extended,
-)
-import config as CFG
 
 try:
     import requests
@@ -231,7 +224,7 @@ def compute_indicators(candles: list) -> dict:
         "adxs":     _adx(candles, 14),
         "vol_sma":  _vol_sma(candles, 20),
         "trend":    _daily_ema100_trend(candles),
-        "rsi4h":    _compute_rsi4h(candles),
+        "rsi4h":    _rsi4h(candles),
         "ema4h20":  _ema4h(candles, 20),
         "ema4h50":  _ema4h(candles, 50),
         "macd_l":   macd_l,
