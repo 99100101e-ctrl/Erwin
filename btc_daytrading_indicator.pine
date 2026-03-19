@@ -11,7 +11,7 @@ strategy("BTC Day Trading System", overlay=true, default_qty_type=strategy.perce
 
 // --- Tendance (EMA) ---
 grp_trend = "📈 Tendance"
-ema_fast_len    = input.int(9,   "EMA Rapide",           minval=2,  group=grp_trend)
+ema_fast_len    = input.int(8,   "EMA Rapide",           minval=2,  group=grp_trend)
 ema_mid_len     = input.int(21,  "EMA Moyenne",          minval=5,  group=grp_trend)
 ema_slow_len    = input.int(55,  "EMA Lente",            minval=10, group=grp_trend)
 ema_trend_len   = input.int(200, "EMA Tendance (200)",   minval=50, group=grp_trend)
@@ -19,8 +19,8 @@ ema_trend_len   = input.int(200, "EMA Tendance (200)",   minval=50, group=grp_tr
 // --- RSI ---
 grp_rsi = "📊 RSI"
 rsi_len         = input.int(14,  "Période RSI",          minval=2,  group=grp_rsi)
-rsi_ob          = input.int(70,  "Surachat",             minval=60, group=grp_rsi)
-rsi_os          = input.int(30,  "Survente",             maxval=40, group=grp_rsi)
+rsi_ob          = input.int(75,  "Surachat",             minval=60, group=grp_rsi)
+rsi_os          = input.int(25,  "Survente",             maxval=40, group=grp_rsi)
 
 // --- MACD ---
 grp_macd = "📉 MACD"
@@ -38,17 +38,17 @@ grp_risk = "🛡️ Gestion du Risque"
 atr_len         = input.int(14,  "Période ATR",          minval=5,  group=grp_risk)
 atr_sl_mult     = input.float(1.5, "Multiplicateur SL (ATR)", minval=0.5, step=0.1, group=grp_risk)
 atr_tp1_mult    = input.float(2.0, "Multiplicateur TP1 (ATR)", minval=1.0, step=0.1, group=grp_risk)
-atr_tp2_mult    = input.float(3.0, "Multiplicateur TP2 (ATR)", minval=1.5, step=0.1, group=grp_risk)
+atr_tp2_mult    = input.float(3.5, "Multiplicateur TP2 (ATR)", minval=1.5, step=0.1, group=grp_risk)
 use_trailing     = input.bool(true, "Trailing Stop activé", group=grp_risk)
 trail_atr_mult   = input.float(2.0, "Multiplicateur Trailing (ATR)", minval=0.5, step=0.1, group=grp_risk)
 
 // --- Filtres ---
 grp_filter = "🔧 Filtres"
-use_ema200_filter = input.bool(true, "Filtre EMA 200 (tendance)", group=grp_filter)
-use_vol_filter    = input.bool(true, "Filtre Volume",             group=grp_filter)
+use_ema200_filter = input.bool(false, "Filtre EMA 200 (tendance)", group=grp_filter)
+use_vol_filter    = input.bool(false, "Filtre Volume",             group=grp_filter)
 use_session_filter = input.bool(true, "Filtre Session (heures actives)", group=grp_filter)
-session_start     = input.int(8,  "Début session (UTC)",  minval=0, maxval=23, group=grp_filter)
-session_end       = input.int(22, "Fin session (UTC)",    minval=0, maxval=23, group=grp_filter)
+session_start     = input.int(13, "Début session (UTC)",  minval=0, maxval=23, group=grp_filter)
+session_end       = input.int(21, "Fin session (UTC)",    minval=0, maxval=23, group=grp_filter)
 
 // --- Affichage ---
 grp_display = "🎨 Affichage"
