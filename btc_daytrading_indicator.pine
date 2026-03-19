@@ -1,0 +1,262 @@
+// This Pine Script™ indicator is designed for BTC day trading on TradingView
+// © Erwin - BTC Day Trading System
+// Timeframes recommandés : 5m, 15m, 30m
+
+//@version=6
+strategy("BTC Day Trading System", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, slippage=2, initial_capital=10000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES UTILISATEUR
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Tendance (EMA) ---
+grp_trend = "📈 Tendance"
+ema_fast_len    = input.int(9,   "EMA Rapide",           minval=2,  group=grp_trend)
+ema_mid_len     = input.int(21,  "EMA Moyenne",          minval=5,  group=grp_trend)
+ema_slow_len    = input.int(55,  "EMA Lente",            minval=10, group=grp_trend)
+ema_trend_len   = input.int(200, "EMA Tendance (200)",   minval=50, group=grp_trend)
+
+// --- RSI ---
+grp_rsi = "📊 RSI"
+rsi_len         = input.int(14,  "Période RSI",          minval=2,  group=grp_rsi)
+rsi_ob          = input.int(70,  "Surachat",             minval=60, group=grp_rsi)
+rsi_os          = input.int(30,  "Survente",             maxval=40, group=grp_rsi)
+
+// --- MACD ---
+grp_macd = "📉 MACD"
+macd_fast       = input.int(12,  "MACD Rapide",          minval=2,  group=grp_macd)
+macd_slow       = input.int(26,  "MACD Lent",            minval=5,  group=grp_macd)
+macd_signal     = input.int(9,   "MACD Signal",          minval=2,  group=grp_macd)
+
+// --- Volume ---
+grp_vol = "🔊 Volume"
+vol_ma_len      = input.int(20,  "Période MA Volume",    minval=5,  group=grp_vol)
+vol_mult        = input.float(1.5, "Multiplicateur Volume", minval=1.0, step=0.1, group=grp_vol)
+
+// --- ATR / Risk Management ---
+grp_risk = "🛡️ Gestion du Risque"
+atr_len         = input.int(14,  "Période ATR",          minval=5,  group=grp_risk)
+atr_sl_mult     = input.float(1.5, "Multiplicateur SL (ATR)", minval=0.5, step=0.1, group=grp_risk)
+atr_tp1_mult    = input.float(2.0, "Multiplicateur TP1 (ATR)", minval=1.0, step=0.1, group=grp_risk)
+atr_tp2_mult    = input.float(3.0, "Multiplicateur TP2 (ATR)", minval=1.5, step=0.1, group=grp_risk)
+use_trailing     = input.bool(true, "Trailing Stop activé", group=grp_risk)
+trail_atr_mult   = input.float(2.0, "Multiplicateur Trailing (ATR)", minval=0.5, step=0.1, group=grp_risk)
+
+// --- Filtres ---
+grp_filter = "🔧 Filtres"
+use_ema200_filter = input.bool(true, "Filtre EMA 200 (tendance)", group=grp_filter)
+use_vol_filter    = input.bool(true, "Filtre Volume",             group=grp_filter)
+use_session_filter = input.bool(true, "Filtre Session (heures actives)", group=grp_filter)
+session_start     = input.int(8,  "Début session (UTC)",  minval=0, maxval=23, group=grp_filter)
+session_end       = input.int(22, "Fin session (UTC)",    minval=0, maxval=23, group=grp_filter)
+
+// --- Affichage ---
+grp_display = "🎨 Affichage"
+show_emas       = input.bool(true,  "Afficher EMAs",       group=grp_display)
+show_signals    = input.bool(true,  "Afficher Signaux",    group=grp_display)
+show_sl_tp      = input.bool(true,  "Afficher SL/TP",      group=grp_display)
+show_dashboard  = input.bool(true,  "Afficher Dashboard",  group=grp_display)
+show_bg         = input.bool(true,  "Fond de tendance",    group=grp_display)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALCULS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- EMAs ---
+ema_fast  = ta.ema(close, ema_fast_len)
+ema_mid   = ta.ema(close, ema_mid_len)
+ema_slow  = ta.ema(close, ema_slow_len)
+ema_trend = ta.ema(close, ema_trend_len)
+
+// --- RSI ---
+rsi_val = ta.rsi(close, rsi_len)
+
+// --- MACD ---
+[macd_line, signal_line, hist_line] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+macd_bull_cross = ta.crossover(macd_line, signal_line)
+macd_bear_cross = ta.crossunder(macd_line, signal_line)
+
+// --- Volume ---
+vol_ma    = ta.sma(volume, vol_ma_len)
+vol_spike = volume > vol_ma * vol_mult
+
+// --- ATR ---
+atr_val = ta.atr(atr_len)
+
+// --- Stochastic RSI (confirmation supplémentaire) ---
+stoch_k = ta.sma(ta.stoch(rsi_val, rsi_val, rsi_val, 14), 3)
+stoch_d = ta.sma(stoch_k, 3)
+
+// --- Session Filter ---
+current_hour = hour(time, "UTC")
+in_session = use_session_filter ? (current_hour >= session_start and current_hour < session_end) : true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DÉTECTION DE TENDANCE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Tendance haussière : EMA rapide > moyenne > lente, prix au-dessus de EMA 200
+bull_trend = ema_fast > ema_mid and ema_mid > ema_slow
+bear_trend = ema_fast < ema_mid and ema_mid < ema_slow
+
+above_ema200 = close > ema_trend
+below_ema200 = close < ema_trend
+
+// Force de la tendance (ADX simplifié via pente EMA)
+ema_slope = (ema_mid - ema_mid[5]) / ema_mid[5] * 100
+strong_trend = math.abs(ema_slope) > 0.1
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONDITIONS D'ENTRÉE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- LONG ---
+// 1. Croisement EMA rapide au-dessus de EMA moyenne
+ema_long_cross = ta.crossover(ema_fast, ema_mid)
+
+// 2. MACD confirme (ligne au-dessus du signal OU croisement récent)
+macd_long_ok = macd_line > signal_line or macd_bull_cross or macd_bull_cross[1] or macd_bull_cross[2]
+
+// 3. RSI ni en surachat
+rsi_long_ok = rsi_val > rsi_os and rsi_val < rsi_ob
+
+// 4. Stoch RSI en zone favorable
+stoch_long_ok = stoch_k > stoch_d or stoch_k < 30
+
+// 5. Filtres optionnels
+ema200_long_ok = use_ema200_filter ? above_ema200 : true
+vol_long_ok    = use_vol_filter ? vol_spike : true
+
+// Signal LONG complet
+long_signal = ema_long_cross and macd_long_ok and rsi_long_ok and stoch_long_ok and ema200_long_ok and vol_long_ok and in_session
+
+// --- SHORT ---
+ema_short_cross = ta.crossunder(ema_fast, ema_mid)
+macd_short_ok   = macd_line < signal_line or macd_bear_cross or macd_bear_cross[1] or macd_bear_cross[2]
+rsi_short_ok    = rsi_val < rsi_ob and rsi_val > rsi_os
+stoch_short_ok  = stoch_k < stoch_d or stoch_k > 70
+ema200_short_ok = use_ema200_filter ? below_ema200 : true
+vol_short_ok    = use_vol_filter ? vol_spike : true
+
+short_signal = ema_short_cross and macd_short_ok and rsi_short_ok and stoch_short_ok and ema200_short_ok and vol_short_ok and in_session
+
+// ══════════════════════════════════════════════════════════════════════════════
+// NIVEAUX SL / TP
+// ══════════════════════════════════════════════════════════════════════════════
+
+long_sl  = close - atr_val * atr_sl_mult
+long_tp1 = close + atr_val * atr_tp1_mult
+long_tp2 = close + atr_val * atr_tp2_mult
+
+short_sl  = close + atr_val * atr_sl_mult
+short_tp1 = close - atr_val * atr_tp1_mult
+short_tp2 = close - atr_val * atr_tp2_mult
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXÉCUTION DES TRADES (MODE STRATEGY)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long TP/SL", "Long", stop=long_sl, limit=long_tp2, trail_points=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na, trail_offset=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na)
+
+if short_signal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short TP/SL", "Short", stop=short_sl, limit=short_tp2, trail_points=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na, trail_offset=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na)
+
+// Fermeture si signal inverse
+if short_signal and strategy.position_size > 0
+    strategy.close("Long", comment="Signal inversé")
+
+if long_signal and strategy.position_size < 0
+    strategy.close("Short", comment="Signal inversé")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- EMAs ---
+plot(show_emas ? ema_fast  : na, "EMA Rapide",   color=color.new(color.lime, 0),   linewidth=1)
+plot(show_emas ? ema_mid   : na, "EMA Moyenne",  color=color.new(color.orange, 0), linewidth=2)
+plot(show_emas ? ema_slow  : na, "EMA Lente",    color=color.new(color.red, 0),    linewidth=2)
+plot(show_emas ? ema_trend : na, "EMA 200",      color=color.new(color.white, 30), linewidth=3, style=plot.style_line)
+
+// --- Fond de tendance ---
+bg_color = show_bg ? (bull_trend and above_ema200 ? color.new(color.green, 92) : bear_trend and below_ema200 ? color.new(color.red, 92) : na) : na
+bgcolor(bg_color, title="Fond Tendance")
+
+// --- Signaux visuels ---
+plotshape(show_signals and long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.normal, color=color.new(color.lime, 0),  text="LONG")
+plotshape(show_signals and short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.new(color.red, 0),   text="SHORT")
+
+// --- Niveaux SL/TP affichés sur les signaux ---
+plot(show_sl_tp and long_signal  ? long_sl   : na, "Long SL",  color=color.red,   style=plot.style_cross, linewidth=2)
+plot(show_sl_tp and long_signal  ? long_tp1  : na, "Long TP1", color=color.green,  style=plot.style_cross, linewidth=2)
+plot(show_sl_tp and long_signal  ? long_tp2  : na, "Long TP2", color=color.lime,   style=plot.style_cross, linewidth=2)
+plot(show_sl_tp and short_signal ? short_sl  : na, "Short SL", color=color.red,    style=plot.style_cross, linewidth=2)
+plot(show_sl_tp and short_signal ? short_tp1 : na, "Short TP1", color=color.green, style=plot.style_cross, linewidth=2)
+plot(show_sl_tp and short_signal ? short_tp2 : na, "Short TP2", color=color.lime,  style=plot.style_cross, linewidth=2)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal,  title="Signal LONG",  message="🟢 BTC LONG Signal — Prix: {{close}} | SL: " + str.tostring(long_sl) + " | TP: " + str.tostring(long_tp2))
+alertcondition(short_signal, title="Signal SHORT", message="🔴 BTC SHORT Signal — Prix: {{close}} | SL: " + str.tostring(short_sl) + " | TP: " + str.tostring(short_tp2))
+alertcondition(vol_spike,    title="Volume Spike",  message="🔊 Volume Spike détecté sur BTC")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD (tableau de bord en haut à droite)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if show_dashboard and barstate.islast
+    var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+
+    // En-tête
+    table.cell(dash, 0, 0, "BTC DAY TRADING", bgcolor=color.new(color.blue, 30), text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, 0, "", bgcolor=color.new(color.blue, 30))
+
+    // Tendance
+    trend_txt = bull_trend ? "HAUSSIÈRE" : bear_trend ? "BAISSIÈRE" : "NEUTRE"
+    trend_col = bull_trend ? color.green : bear_trend ? color.red : color.gray
+    table.cell(dash, 0, 1, "Tendance", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, trend_txt, text_color=trend_col, text_size=size.small)
+
+    // EMA 200
+    ema200_txt = above_ema200 ? "AU-DESSUS" : "EN-DESSOUS"
+    ema200_col = above_ema200 ? color.green : color.red
+    table.cell(dash, 0, 2, "EMA 200", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, ema200_txt, text_color=ema200_col, text_size=size.small)
+
+    // RSI
+    rsi_col = rsi_val > rsi_ob ? color.red : rsi_val < rsi_os ? color.green : color.white
+    table.cell(dash, 0, 3, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(rsi_val, "#.0"), text_color=rsi_col, text_size=size.small)
+
+    // MACD
+    macd_txt = macd_line > signal_line ? "BULL" : "BEAR"
+    macd_col = macd_line > signal_line ? color.green : color.red
+    table.cell(dash, 0, 4, "MACD", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, macd_txt, text_color=macd_col, text_size=size.small)
+
+    // Volume
+    vol_txt = vol_spike ? "SPIKE" : "NORMAL"
+    vol_col = vol_spike ? color.yellow : color.gray
+    table.cell(dash, 0, 5, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, vol_txt, text_color=vol_col, text_size=size.small)
+
+    // ATR
+    table.cell(dash, 0, 6, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(atr_val, "#.0"), text_color=color.white, text_size=size.small)
+
+    // Stoch RSI
+    stoch_txt = stoch_k > 80 ? "SURACHAT" : stoch_k < 20 ? "SURVENTE" : "NEUTRE"
+    stoch_col = stoch_k > 80 ? color.red : stoch_k < 20 ? color.green : color.gray
+    table.cell(dash, 0, 7, "Stoch RSI", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, stoch_txt, text_color=stoch_col, text_size=size.small)
+
+    // Session
+    sess_txt = in_session ? "ACTIVE" : "INACTIVE"
+    sess_col = in_session ? color.green : color.red
+    table.cell(dash, 0, 8, "Session", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, sess_txt, text_color=sess_col, text_size=size.small)
