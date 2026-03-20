@@ -1,0 +1,289 @@
+// This Pine Script™ strategy is designed for profitable BTC day trading
+// © Erwin — BTC Day Trading System V2 — Dual Regime (Trend + Mean Reversion)
+// Timeframes recommandés : 15m, 30m
+
+//@version=6
+strategy("BTC DayTrader V2", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, slippage=2, initial_capital=10000, pyramiding=0)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp_core = "Core"
+ema_fast_len    = input.int(8,   "EMA Rapide",     minval=2,  group=grp_core)
+ema_slow_len    = input.int(21,  "EMA Lente",      minval=5,  group=grp_core)
+bb_len          = input.int(20,  "BB Période",     minval=10, group=grp_core)
+bb_mult         = input.float(2.0, "BB Multiplicateur", minval=1.0, step=0.1, group=grp_core)
+
+grp_regime = "Régime"
+adx_len         = input.int(14,  "ADX Période",    minval=5,  group=grp_regime)
+adx_threshold   = input.int(20,  "ADX Seuil Trend", minval=10, group=grp_regime)
+
+grp_confirm = "Confirmation"
+rsi_len         = input.int(14,  "RSI Période",    minval=5,  group=grp_confirm)
+vol_ma_len      = input.int(20,  "Vol MA Période", minval=5,  group=grp_confirm)
+
+grp_risk = "Gestion du Risque"
+atr_len         = input.int(14,  "ATR Période",    minval=5,  group=grp_risk)
+sl_atr_mult     = input.float(1.5, "SL (x ATR)",  minval=0.5, step=0.1, group=grp_risk)
+tp1_atr_mult    = input.float(1.5, "TP1 (x ATR)", minval=0.5, step=0.1, group=grp_risk)
+tp2_atr_mult    = input.float(3.0, "TP2 (x ATR)", minval=1.0, step=0.1, group=grp_risk)
+use_trailing    = input.bool(true, "Trailing Stop", group=grp_risk)
+trail_atr_mult  = input.float(2.0, "Trail (x ATR)", minval=0.5, step=0.1, group=grp_risk)
+
+grp_filter = "Filtres"
+use_session     = input.bool(true, "Filtre Session", group=grp_filter)
+sess_start      = input.int(8,   "Début (UTC)",    minval=0, maxval=23, group=grp_filter)
+sess_end        = input.int(22,  "Fin (UTC)",      minval=0, maxval=23, group=grp_filter)
+min_rr          = input.float(1.5, "Min Risk/Reward", minval=1.0, step=0.1, group=grp_filter)
+
+grp_display = "Affichage"
+show_bb         = input.bool(true,  "Bollinger Bands", group=grp_display)
+show_emas       = input.bool(true,  "EMAs",            group=grp_display)
+show_signals    = input.bool(true,  "Signaux",         group=grp_display)
+show_dash       = input.bool(true,  "Dashboard",       group=grp_display)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALCULS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Trend ---
+ema_f = ta.ema(close, ema_fast_len)
+ema_s = ta.ema(close, ema_slow_len)
+
+// --- Bollinger Bands ---
+bb_basis = ta.sma(close, bb_len)
+bb_dev   = bb_mult * ta.stdev(close, bb_len)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+bb_width = (bb_upper - bb_lower) / bb_basis * 100
+bb_pct_b = (close - bb_lower) / (bb_upper - bb_lower)
+
+// --- ADX (Trend Strength) ---
+[di_plus, di_minus, adx_val] = ta.dmi(adx_len, adx_len)
+is_trending = adx_val > adx_threshold
+is_ranging  = adx_val <= adx_threshold
+
+// --- RSI ---
+rsi_val = ta.rsi(close, rsi_len)
+
+// --- ATR ---
+atr_val = ta.atr(atr_len)
+
+// --- Volume ---
+vol_ma   = ta.sma(volume, vol_ma_len)
+vol_ok   = volume > vol_ma * 0.8
+
+// --- Session ---
+hr = hour(time, "UTC")
+in_session = use_session ? (hr >= sess_start and hr < sess_end) : true
+
+// --- Swing High/Low (support/résistance dynamique) ---
+swing_high = ta.pivothigh(high, 5, 5)
+swing_low  = ta.pivotlow(low, 5, 5)
+var float last_swing_high = na
+var float last_swing_low  = na
+if not na(swing_high)
+    last_swing_high := swing_high
+if not na(swing_low)
+    last_swing_low := swing_low
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RÉGIME 1 : MEAN REVERSION (Range — ADX < seuil)
+// Acheter sur BB lower, vendre sur BB upper
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG Mean Reversion : prix touche BB inférieur + RSI survente
+mr_long = is_ranging and
+     close <= bb_lower and
+     rsi_val < 35 and
+     vol_ok and
+     in_session
+
+// SHORT Mean Reversion : prix touche BB supérieur + RSI surachat
+mr_short = is_ranging and
+     close >= bb_upper and
+     rsi_val > 65 and
+     vol_ok and
+     in_session
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RÉGIME 2 : MOMENTUM/BREAKOUT (Tendance — ADX > seuil)
+// Suivre la tendance sur croisement EMA + confirmation
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Pullback long en tendance : EMA rapide > lente, prix revient sur EMA lente
+ema_bull = ema_f > ema_s
+ema_bear = ema_f < ema_s
+
+// LONG Momentum : tendance haussière + pullback sur EMA + rebond
+mom_long = is_trending and
+     ema_bull and
+     di_plus > di_minus and
+     low <= ema_s * 1.002 and
+     close > ema_s and
+     rsi_val > 40 and rsi_val < 70 and
+     in_session
+
+// SHORT Momentum : tendance baissière + pullback sur EMA + rejet
+mom_short = is_trending and
+     ema_bear and
+     di_minus > di_plus and
+     high >= ema_s * 0.998 and
+     close < ema_s and
+     rsi_val > 30 and rsi_val < 60 and
+     in_session
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX COMBINÉS
+// ══════════════════════════════════════════════════════════════════════════════
+
+long_signal  = (mr_long or mom_long) and strategy.position_size == 0
+short_signal = (mr_short or mom_short) and strategy.position_size == 0
+
+// Type de signal pour adapter les sorties
+is_mr_long   = mr_long and not mom_long
+is_mr_short  = mr_short and not mom_short
+is_mom_long  = mom_long
+is_mom_short = mom_short
+
+// ══════════════════════════════════════════════════════════════════════════════
+// NIVEAUX SL / TP ADAPTATIFS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Mean Reversion : TP à la bande opposée, SL serré
+// Momentum : TP plus large, trailing stop
+
+// LONG
+float l_sl  = na
+float l_tp1 = na
+float l_tp2 = na
+
+if long_signal
+    if is_mr_long
+        // MR: SL sous le BB lower, TP1 au milieu, TP2 au BB upper
+        l_sl  := math.min(close - atr_val * sl_atr_mult, bb_lower - atr_val * 0.3)
+        l_tp1 := bb_basis
+        l_tp2 := bb_upper
+    else
+        // Momentum: SL sous swing low, TP basé ATR
+        l_sl  := math.max(close - atr_val * sl_atr_mult, nz(last_swing_low, close - atr_val * 2))
+        l_tp1 := close + atr_val * tp1_atr_mult
+        l_tp2 := close + atr_val * tp2_atr_mult
+
+// SHORT
+float s_sl  = na
+float s_tp1 = na
+float s_tp2 = na
+
+if short_signal
+    if is_mr_short
+        s_sl  := math.max(close + atr_val * sl_atr_mult, bb_upper + atr_val * 0.3)
+        s_tp1 := bb_basis
+        s_tp2 := bb_lower
+    else
+        s_sl  := math.min(close + atr_val * sl_atr_mult, nz(last_swing_high, close + atr_val * 2))
+        s_tp1 := close - atr_val * tp1_atr_mult
+        s_tp2 := close - atr_val * tp2_atr_mult
+
+// --- Filtre Risk/Reward minimum ---
+float rr_long  = long_signal  ? (nz(l_tp2) - close) / (close - nz(l_sl)) : 0
+float rr_short = short_signal ? (close - nz(s_tp2)) / (nz(s_sl) - close) : 0
+
+long_valid  = long_signal  and rr_long  >= min_rr
+short_valid = short_signal and rr_short >= min_rr
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXÉCUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_valid
+    strategy.entry("L", strategy.long)
+    strategy.exit("L_exit", "L", stop=l_sl, limit=l_tp2, trail_points=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na, trail_offset=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na)
+
+if short_valid
+    strategy.entry("S", strategy.short)
+    strategy.exit("S_exit", "S", stop=s_sl, limit=s_tp2, trail_points=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na, trail_offset=use_trailing ? atr_val * trail_atr_mult / syminfo.mintick : na)
+
+// Fermeture sur signal inversé
+if short_valid and strategy.position_size > 0
+    strategy.close("L", comment="Reverse")
+if long_valid and strategy.position_size < 0
+    strategy.close("S", comment="Reverse")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(show_emas ? ema_f : na, "EMA Fast", color=color.new(color.lime, 0), linewidth=1)
+plot(show_emas ? ema_s : na, "EMA Slow", color=color.new(color.orange, 0), linewidth=2)
+
+// Bollinger Bands
+p_bb_u = plot(show_bb ? bb_upper : na, "BB Upper", color=color.new(color.gray, 50))
+p_bb_l = plot(show_bb ? bb_lower : na, "BB Lower", color=color.new(color.gray, 50))
+plot(show_bb ? bb_basis : na, "BB Mid", color=color.new(color.gray, 70), style=plot.style_line)
+fill(p_bb_u, p_bb_l, color=is_trending ? color.new(color.blue, 92) : color.new(color.purple, 92), title="BB Fill")
+
+// Background regime
+bgcolor(is_trending ? color.new(color.blue, 95) : color.new(color.purple, 95), title="Régime")
+
+// Signaux
+plotshape(show_signals and long_valid and is_mr_long,   title="MR Long",  location=location.belowbar, style=shape.circle,     size=size.small,  color=color.new(color.lime, 0), text="MR")
+plotshape(show_signals and long_valid and is_mom_long,  title="Mom Long", location=location.belowbar, style=shape.triangleup, size=size.normal, color=color.new(color.green, 0), text="MOM")
+plotshape(show_signals and short_valid and is_mr_short,  title="MR Short", location=location.abovebar, style=shape.circle,      size=size.small,  color=color.new(color.red, 0), text="MR")
+plotshape(show_signals and short_valid and is_mom_short, title="Mom Short",location=location.abovebar, style=shape.triangledown,size=size.normal, color=color.new(color.orange, 0), text="MOM")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_valid,  title="LONG",  message="BTC LONG — {{close}} | Régime: " + (is_mr_long ? "Mean Reversion" : "Momentum"))
+alertcondition(short_valid, title="SHORT", message="BTC SHORT — {{close}} | Régime: " + (is_mr_short ? "Mean Reversion" : "Momentum"))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if show_dash and barstate.islast
+    var table d = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+
+    table.cell(d, 0, 0, "BTC V2", bgcolor=color.new(color.blue, 30), text_color=color.white, text_size=size.normal)
+    table.cell(d, 1, 0, "", bgcolor=color.new(color.blue, 30))
+
+    // Régime
+    reg_txt = is_trending ? "TREND" : "RANGE"
+    reg_col = is_trending ? color.blue : color.purple
+    table.cell(d, 0, 1, "Régime", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, reg_txt + " (" + str.tostring(adx_val, "#.0") + ")", text_color=reg_col, text_size=size.small)
+
+    // Tendance EMA
+    ema_txt = ema_bull ? "BULL" : ema_bear ? "BEAR" : "FLAT"
+    ema_col = ema_bull ? color.green : ema_bear ? color.red : color.gray
+    table.cell(d, 0, 2, "EMA", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, ema_txt, text_color=ema_col, text_size=size.small)
+
+    // BB %B
+    bb_txt = bb_pct_b > 0.8 ? "SURACHAT" : bb_pct_b < 0.2 ? "SURVENTE" : "NEUTRE"
+    bb_col = bb_pct_b > 0.8 ? color.red : bb_pct_b < 0.2 ? color.green : color.gray
+    table.cell(d, 0, 3, "BB %B", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, str.tostring(bb_pct_b, "#.##") + " " + bb_txt, text_color=bb_col, text_size=size.small)
+
+    // RSI
+    rsi_col = rsi_val > 65 ? color.red : rsi_val < 35 ? color.green : color.white
+    table.cell(d, 0, 4, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, str.tostring(rsi_val, "#.0"), text_color=rsi_col, text_size=size.small)
+
+    // ATR
+    table.cell(d, 0, 5, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, str.tostring(atr_val, "#.0"), text_color=color.white, text_size=size.small)
+
+    // DI+/DI-
+    di_col = di_plus > di_minus ? color.green : color.red
+    table.cell(d, 0, 6, "DI+/DI-", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, str.tostring(di_plus, "#.0") + "/" + str.tostring(di_minus, "#.0"), text_color=di_col, text_size=size.small)
+
+    // Session
+    sess_col = in_session ? color.green : color.red
+    table.cell(d, 0, 7, "Session", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, in_session ? "ACTIVE" : "OFF", text_color=sess_col, text_size=size.small)

@@ -1,0 +1,286 @@
+// BTC Day Trading V3 — Structure + Multi-Timeframe
+// © Erwin — Stratégie ultra-sélective pour BTC
+// TESTER SUR TRADINGVIEW AVEC DONNÉES RÉELLES (15m)
+//
+// Philosophie: Moins de trades, meilleure qualité
+// - 4H pour le biais directionnel
+// - 15m pour l'entrée précise
+// - Breakout de consolidation + S/R
+// - Stops sur structure (pas ATR fixe)
+// - Sorties partielles + trailing
+
+//@version=6
+strategy("BTC DayTrader V3 — Structure", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "Multi-Timeframe"
+htf = input.timeframe("240", "HTF (Biais)", group=grp1)
+ema_htf_len = input.int(50, "EMA HTF", minval=10, group=grp1)
+
+grp2 = "Structure"
+lookback     = input.int(20, "Lookback Range", minval=5, group=grp2)
+breakout_mult = input.float(0.5, "Breakout Min (x ATR)", step=0.1, group=grp2)
+consol_bars  = input.int(8, "Min bars consolidation", minval=3, group=grp2)
+consol_width = input.float(1.5, "Max largeur range (x ATR)", step=0.1, group=grp2)
+
+grp3 = "Confirmation"
+rsi_len    = input.int(14, "RSI", minval=5, group=grp3)
+vol_mult   = input.float(1.3, "Volume x MA pour breakout", step=0.1, group=grp3)
+vol_ma_len = input.int(20, "Volume MA", minval=5, group=grp3)
+
+grp4 = "Risque"
+atr_len       = input.int(14, "ATR Période", minval=5, group=grp4)
+sl_buffer      = input.float(0.3, "SL Buffer (x ATR)", step=0.1, group=grp4)
+tp1_rr         = input.float(1.5, "TP1 (x Risk)", step=0.1, group=grp4)
+tp2_rr         = input.float(3.0, "TP2 (x Risk)", step=0.1, group=grp4)
+use_trailing   = input.bool(true, "Trailing Stop", group=grp4)
+trail_activation = input.float(1.5, "Trail activé après (x Risk)", step=0.1, group=grp4)
+trail_offset_rr = input.float(0.8, "Trail Offset (x Risk)", step=0.1, group=grp4)
+max_trades_day = input.int(3, "Max trades/jour", minval=1, maxval=10, group=grp4)
+
+grp5 = "Session"
+use_session = input.bool(true, "Filtre Session", group=grp5)
+sess_london = input.bool(true, "London (08-12 UTC)", group=grp5)
+sess_ny     = input.bool(true, "New York (13-17 UTC)", group=grp5)
+sess_overlap= input.bool(true, "Overlap (12-16 UTC)", group=grp5)
+
+grp6 = "Affichage"
+show_levels  = input.bool(true, "Niveaux S/R", group=grp6)
+show_htf_ema = input.bool(true, "HTF EMA", group=grp6)
+show_consol  = input.bool(true, "Zones consolidation", group=grp6)
+show_dash    = input.bool(true, "Dashboard", group=grp6)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALCULS HTF (Biais)
+// ══════════════════════════════════════════════════════════════════════════════
+
+ema_htf = request.security(syminfo.tickerid, htf, ta.ema(close, ema_htf_len), lookahead=barmerge.lookahead_off)
+htf_close = request.security(syminfo.tickerid, htf, close, lookahead=barmerge.lookahead_off)
+
+bias_bull = htf_close > ema_htf
+bias_bear = htf_close < ema_htf
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATEURS LTF
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsi_val = ta.rsi(close, rsi_len)
+atr_val = ta.atr(atr_len)
+vol_ma = ta.sma(volume, vol_ma_len)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STRUCTURE : Détection de consolidation + Niveaux S/R
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Range haut/bas sur lookback
+range_high = ta.highest(high, lookback)
+range_low  = ta.lowest(low, lookback)
+range_width = range_high - range_low
+
+// Détection consolidation : range < consol_width * ATR pendant consol_bars
+is_narrow = range_width < consol_width * atr_val
+narrow_count = 0
+for i = 0 to consol_bars - 1
+    if is_narrow[i]
+        narrow_count += 1
+
+in_consolidation = narrow_count >= consol_bars
+
+// Breakout
+breakout_up = in_consolidation[1] and close > range_high[1] and (close - range_high[1]) > atr_val * breakout_mult
+breakout_dn = in_consolidation[1] and close < range_low[1] and (range_low[1] - close) > atr_val * breakout_mult
+
+// Swing pivots pour S/R
+pivot_high = ta.pivothigh(high, 10, 10)
+pivot_low = ta.pivotlow(low, 10, 10)
+var float sr_resist = na
+var float sr_support = na
+if not na(pivot_high)
+    sr_resist := pivot_high
+if not na(pivot_low)
+    sr_support := pivot_low
+
+// Bounce sur S/R
+near_support = not na(sr_support) and low <= sr_support * 1.003 and close > sr_support
+near_resist  = not na(sr_resist) and high >= sr_resist * 0.997 and close < sr_resist
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+london  = hr >= 8 and hr < 12
+ny      = hr >= 13 and hr < 17
+overlap = hr >= 12 and hr < 16
+
+in_session = not use_session or
+     (sess_london and london) or
+     (sess_ny and ny) or
+     (sess_overlap and overlap)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COMPTEUR TRADES / JOUR
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int trades_today = 0
+new_day = ta.change(dayofmonth(time))
+if new_day
+    trades_today := 0
+can_trade = trades_today < max_trades_day
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Volume confirmation
+vol_spike = volume > vol_ma * vol_mult
+
+// LONG conditions
+// Option A: Breakout haussier + biais HTF bull + volume
+long_breakout = breakout_up and bias_bull and vol_spike and rsi_val > 50 and rsi_val < 75
+// Option B: Bounce sur support + biais HTF bull
+long_bounce   = near_support and bias_bull and rsi_val < 40 and volume > vol_ma
+
+long_signal = (long_breakout or long_bounce) and in_session and can_trade and strategy.position_size == 0
+
+// SHORT conditions
+short_breakout = breakout_dn and bias_bear and vol_spike and rsi_val < 50 and rsi_val > 25
+short_bounce   = near_resist and bias_bear and rsi_val > 60 and volume > vol_ma
+
+short_signal = (short_breakout or short_bounce) and in_session and can_trade and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SL / TP basés sur STRUCTURE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float entry_price = na
+var float trade_sl    = na
+var float trade_tp1   = na
+var float trade_tp2   = na
+var float trade_risk  = na
+
+if long_signal
+    // SL sous le range bas (ou support) + buffer
+    sl_level = math.min(range_low[1], nz(sr_support, range_low[1])) - atr_val * sl_buffer
+    risk = close - sl_level
+    tp1 = close + risk * tp1_rr
+    tp2 = close + risk * tp2_rr
+
+    if risk > 0 and risk < atr_val * 3 // pas de SL aberrant
+        entry_price := close
+        trade_sl    := sl_level
+        trade_tp1   := tp1
+        trade_tp2   := tp2
+        trade_risk  := risk
+        trades_today += 1
+        strategy.entry("L", strategy.long)
+        strategy.exit("L_TP2", "L", stop=sl_level, limit=tp2,
+             trail_points=use_trailing ? risk * trail_activation / syminfo.mintick : na,
+             trail_offset=use_trailing ? risk * trail_offset_rr / syminfo.mintick : na)
+
+if short_signal
+    sl_level = math.max(range_high[1], nz(sr_resist, range_high[1])) + atr_val * sl_buffer
+    risk = sl_level - close
+    tp1 = close - risk * tp1_rr
+    tp2 = close - risk * tp2_rr
+
+    if risk > 0 and risk < atr_val * 3
+        entry_price := close
+        trade_sl    := sl_level
+        trade_tp1   := tp1
+        trade_tp2   := tp2
+        trade_risk  := risk
+        trades_today += 1
+        strategy.entry("S", strategy.short)
+        strategy.exit("S_TP2", "S", stop=sl_level, limit=tp2,
+             trail_points=use_trailing ? risk * trail_activation / syminfo.mintick : na,
+             trail_offset=use_trailing ? risk * trail_offset_rr / syminfo.mintick : na)
+
+// Fermer sur signal opposé
+if short_signal and strategy.position_size > 0
+    strategy.close("L", comment="Rev")
+if long_signal and strategy.position_size < 0
+    strategy.close("S", comment="Rev")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// HTF EMA
+plot(show_htf_ema ? ema_htf : na, "HTF EMA", color=color.new(color.yellow, 0), linewidth=3, style=plot.style_stepline_diamond)
+
+// S/R levels
+plot(show_levels and not na(sr_resist) ? sr_resist : na, "Résistance", color=color.new(color.red, 30), linewidth=2, style=plot.style_circles)
+plot(show_levels and not na(sr_support) ? sr_support : na, "Support",    color=color.new(color.green, 30), linewidth=2, style=plot.style_circles)
+
+// Consolidation zone
+bgcolor(show_consol and in_consolidation ? color.new(color.orange, 90) : na, title="Consolidation")
+
+// Signaux
+plotshape(long_breakout and long_signal,  title="Long BK",  location=location.belowbar, style=shape.triangleup,   size=size.normal, color=color.green, text="BK↑")
+plotshape(long_bounce and long_signal,    title="Long SR",  location=location.belowbar, style=shape.diamond,       size=size.small,  color=color.lime,  text="SR↑")
+plotshape(short_breakout and short_signal, title="Short BK", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.red,   text="BK↓")
+plotshape(short_bounce and short_signal,   title="Short SR", location=location.abovebar, style=shape.diamond,       size=size.small,  color=color.orange,text="SR↓")
+
+// Biais
+barcolor(bias_bull ? color.new(color.green, 80) : bias_bear ? color.new(color.red, 80) : na)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if show_dash and barstate.islast
+    var table d = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+    table.cell(d, 0, 0, "BTC V3", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.normal)
+    table.cell(d, 1, 0, "Structure", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.normal)
+
+    // Biais HTF
+    b_txt = bias_bull ? "BULL" : bias_bear ? "BEAR" : "NEUTRE"
+    b_col = bias_bull ? color.green : bias_bear ? color.red : color.gray
+    table.cell(d, 0, 1, "HTF Biais", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, b_txt, text_color=b_col, text_size=size.small)
+
+    // Consolidation
+    c_col = in_consolidation ? color.orange : color.gray
+    table.cell(d, 0, 2, "Consolidation", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, in_consolidation ? "OUI" : "NON", text_color=c_col, text_size=size.small)
+
+    // Range width
+    table.cell(d, 0, 3, "Range", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, str.tostring(range_width, "#.0") + " (" + str.tostring(range_width / atr_val, "#.#") + "x ATR)", text_color=color.white, text_size=size.small)
+
+    // RSI
+    rsi_col = rsi_val > 70 ? color.red : rsi_val < 30 ? color.green : color.white
+    table.cell(d, 0, 4, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, str.tostring(rsi_val, "#.0"), text_color=rsi_col, text_size=size.small)
+
+    // Volume
+    v_col = volume > vol_ma * vol_mult ? color.green : color.gray
+    table.cell(d, 0, 5, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, volume > vol_ma * vol_mult ? "SPIKE" : "Normal", text_color=v_col, text_size=size.small)
+
+    // Support/Résistance
+    table.cell(d, 0, 6, "Support", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, not na(sr_support) ? str.tostring(sr_support, "#.0") : "—", text_color=color.green, text_size=size.small)
+    table.cell(d, 0, 7, "Résistance", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, not na(sr_resist) ? str.tostring(sr_resist, "#.0") : "—", text_color=color.red, text_size=size.small)
+
+    // Trades today
+    td_col = trades_today >= max_trades_day ? color.red : color.white
+    table.cell(d, 0, 8, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 8, str.tostring(trades_today) + "/" + str.tostring(max_trades_day), text_color=td_col, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal,  title="LONG V3",  message="BTC V3 LONG {{close}} | Type: " + (long_breakout ? "Breakout" : "S/R Bounce"))
+alertcondition(short_signal, title="SHORT V3", message="BTC V3 SHORT {{close}} | Type: " + (short_breakout ? "Breakout" : "S/R Bounce"))
+alertcondition(in_consolidation and not in_consolidation[1], title="Consolidation", message="BTC: Entrée en consolidation — Breakout imminent")
