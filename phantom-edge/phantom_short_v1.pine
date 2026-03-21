@@ -1,17 +1,18 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM SHORT V9 — Bear Market Only                                      ║
+// ║  PHANTOM SHORT V9 — Full Trend Ride                                       ║
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
 // ║  DIAGNOSTIC V7/V8 :                                                        ║
 // ║  - Les trades capturaient de vrais pullbacks (excursion favorable OK)      ║
-// ║  - MAIS : on shortait dans un BULL MARKET (BTC 40k → 100k+)              ║
-// ║  - Les pullbacks de 5-10% étaient suivis de rallyes de 20%+              ║
-// ║  - EMA 21/50 cross = signal de pullback, PAS de bear market              ║
+// ║  - V7 : sortie "close > EMA rapide" trop rapide → rendait le profit      ║
+// ║  - V8 : trailing stop 5% trop serré pour BTC daily → sortait trop tôt   ║
 // ║                                                                            ║
-// ║  V9 : FILTRE TENDANCE MAJEURE (EMA 200)                                  ║
-// ║  - Ne shorter QUE quand close < EMA 200 = vrai bear market               ║
-// ║  - Trailing stop élargi (10% activation, 12% trail) pour BTC daily       ║
-// ║  - Résultat : moins de trades, mais UNIQUEMENT en bear market            ║
+// ║  V9 : SORTIE = EMA RE-CROSS HAUSSIER (par défaut)                        ║
+// ║  - On reste dans le trade pendant TOUTE la phase baissière               ║
+// ║  - Sortie uniquement quand EMA rapide repasse AU-DESSUS de EMA lente     ║
+// ║  - = vrai retournement de tendance, pas un simple rebond                  ║
+// ║  - EMA 200 dispo en option (off par défaut)                               ║
+// ║  - Trailing stop élargi (10%/12%) en filet de sécurité                   ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
@@ -25,8 +26,8 @@ strategy("Phantom Short V9 — Bear Only", overlay=true,
 // ══════════════════════════════════════════════════════════════════════════════
 
 grp0 = "Filtre Tendance Majeure"
-use_macro      = input.bool(true, "Filtre EMA 200 actif", group=grp0,
-     tooltip="NE shorter que quand close < EMA 200. Empêche de shorter dans un bull market.")
+use_macro      = input.bool(false, "Filtre EMA 200 actif", group=grp0,
+     tooltip="NE shorter que quand close < EMA 200. Optionnel — activer uniquement pour bear markets purs.")
 ema_macro_len  = input.int(200, "EMA macro (tendance majeure)", group=grp0, minval=50)
 
 grp1 = "Signal EMAs"
@@ -41,8 +42,9 @@ adx_min       = input.float(20,  "ADX minimum",  step=1.0, group=grp2,
      tooltip="ADX > 20 = trend en cours. ADX < 20 = range/chop → pas de trade")
 
 grp3 = "Sortie"
-exit_mode     = input.string("Close au-dessus EMA rapide", "Mode de sortie",
-     options=["Close au-dessus EMA rapide", "Close au-dessus EMA lente", "EMA re-cross haussier"], group=grp3)
+exit_mode     = input.string("EMA re-cross haussier", "Mode de sortie",
+     options=["EMA re-cross haussier", "Close au-dessus EMA rapide", "Close au-dessus EMA lente"], group=grp3,
+     tooltip="EMA re-cross = attend le vrai retournement de tendance. Meilleur résultat car on reste dans le trade pendant toute la phase baissière.")
 exit_bars     = input.int(2, "Barres consécutives au-dessus pour sortir", group=grp3, minval=1)
 
 grp4 = "Trailing Stop — verrouille les gains"
