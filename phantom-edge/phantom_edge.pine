@@ -274,7 +274,7 @@ in_session  = not use_session or london_open or ny_open
 
 // Daily trade counter
 var int day_trades = 0
-if ta.change(dayofmonth(time))
+if ta.change(dayofmonth(time)) != 0
     day_trades := 0
 can_trade = day_trades < max_daily
 
