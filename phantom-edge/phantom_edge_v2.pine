@@ -84,11 +84,11 @@ fvg_bear_detected = high < low[2] and (low[2] - high) / close * 100 >= fvg_min_s
 // Track active FVGs
 var float fvg_bull_high = na
 var float fvg_bull_low = na
-var int fvg_bull_age = 0
+var float fvg_bull_age = 0.0
 
 var float fvg_bear_high = na
 var float fvg_bear_low = na
-var int fvg_bear_age = 0
+var float fvg_bear_age = 0.0
 
 if fvg_bull_detected
     fvg_bull_high := low
@@ -197,19 +197,19 @@ final_short = short_signal or sweep_short
 // ══════════════════════════════════════════════════════════════════════════════
 
 if final_long
-    sl = close - atr_val * sl_atr_mult
-    risk = close - sl
+    float sl = close - atr_val * sl_atr_mult
+    float risk = close - sl
     if risk > 0 and risk < atr_val * 3
-        tp = close + risk * tp_rr
+        float tp = close + risk * tp_rr
         day_trades += 1
         strategy.entry("L", strategy.long)
         strategy.exit("L_exit", "L", stop=sl, limit=tp)
 
 if final_short
-    sl = close + atr_val * sl_atr_mult
-    risk = sl - close
+    float sl = close + atr_val * sl_atr_mult
+    float risk = sl - close
     if risk > 0 and risk < atr_val * 3
-        tp = close - risk * tp_rr
+        float tp = close - risk * tp_rr
         day_trades += 1
         strategy.entry("S", strategy.short)
         strategy.exit("S_exit", "S", stop=sl, limit=tp)
