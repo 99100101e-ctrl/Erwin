@@ -36,6 +36,10 @@ atr_len       = input.int(14,    "ATR Period",          group=grp3)
 long_sl_mult  = input.float(1.5, "Long SL (x ATR)",     step=0.25, group=grp3)
 long_trail    = input.bool(true, "Long Trailing Stop",   group=grp3)
 long_trail_m  = input.float(2.0, "Long Trail (x ATR)",   step=0.25, group=grp3)
+long_use_be   = input.bool(true, "Long Breakeven Stop",  group=grp3,
+     tooltip="Quand le long atteint X% de profit, le stop passe au prix d'entrée. Protège contre les faux breakouts.")
+long_be_pct   = input.float(5.0, "Long BE activation (%)", step=0.5, group=grp3,
+     tooltip="Une fois ce profit atteint, le stop passe à l'entrée.")
 
 grp4 = "SHORT — Risk (paramètres différents)"
 short_sl_mult   = input.float(3.0,  "Short SL (x ATR)",        step=0.25, group=grp4,
@@ -88,6 +92,8 @@ short_signal = st_flip_bear and macro_short and in_session
 
 var float trail_long_val  = na
 var float trail_short_val = na
+var float long_entry_price = na
+var bool  long_be_reached  = false
 
 // --- Fermer position opposée sur flip ---
 if st_flip_bull and strategy.position_size < 0
@@ -97,6 +103,7 @@ if st_flip_bull and strategy.position_size < 0
 if st_flip_bear and strategy.position_size > 0
     strategy.close("L", comment="ST Flip ▼")
     trail_long_val := na
+    long_be_reached := false
 
 // ══════════════════════════════════════════════════════════════════════════════
 // LONG — Trailing stop (ça marche, on garde tel quel)
@@ -108,12 +115,27 @@ if long_signal
     if risk > 0
         trail_long_val  := sl
         trail_short_val := na
+        long_entry_price := close
+        long_be_reached  := false
         strategy.entry("L", strategy.long)
         if not long_trail
             strategy.exit("L_sl", "L", stop=sl)
 
+// ── Long Breakeven Stop ──
+if strategy.position_size > 0 and long_use_be and not na(long_entry_price)
+    float long_profit = (close - long_entry_price) / long_entry_price * 100
+    if long_profit >= long_be_pct
+        long_be_reached := true
+    if long_be_reached and close <= long_entry_price
+        strategy.close("L", comment="BE Stop L")
+        trail_long_val := na
+        long_be_reached := false
+
+// ── Long Trailing Stop ──
 if long_trail and strategy.position_size > 0 and not na(trail_long_val)
-    trail_long_val := math.max(trail_long_val, close - atr_val * long_trail_m)
+    // Si breakeven atteint, le trail ne peut pas descendre sous l'entrée
+    float trail_floor = long_be_reached and not na(long_entry_price) ? long_entry_price : trail_long_val
+    trail_long_val := math.max(trail_floor, close - atr_val * long_trail_m)
     if close <= trail_long_val
         strategy.close("L", comment="Trail L")
         trail_long_val := na
