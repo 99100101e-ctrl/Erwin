@@ -348,6 +348,6 @@ if barstate.islast
 // ALERTES
 // ══════════════════════════════════════════════════════════════════════════════
 
-alertcondition(long_signal,  title="V14 LONG",  message="PE V14 LONG — Conf " + str.tostring(long_conf) + "/5 | ADX " + str.tostring(adx_val, "#.0") + " | {{close}}")
-alertcondition(short_signal, title="V14 SHORT", message="PE V14 SHORT — Conf " + str.tostring(short_conf) + "/5 | ADX " + str.tostring(adx_val, "#.0") + " | {{close}}")
-alertcondition(cb_paused,    title="V14 PAUSE", message="PE V14 CIRCUIT BREAKER — " + str.tostring(consec_losses) + " pertes consécutives")
+alertcondition(long_signal,  title="V14 LONG",  message="PE V14 LONG — Pullback EMA21 | {{close}}")
+alertcondition(short_signal, title="V14 SHORT", message="PE V14 SHORT — Pullback EMA21 | {{close}}")
+alertcondition(cb_paused,    title="V14 PAUSE", message="PE V14 CIRCUIT BREAKER — Trading en pause")
