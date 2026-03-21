@@ -369,11 +369,11 @@ def manage_long(state: ScannerState, klines_4h: np.ndarray) -> Optional[str]:
     return None
 
 
-def manage_short(state: ScannerState, klines_4h: np.ndarray) -> Optional[str]:
-    """Gère un SHORT ouvert — SL fixe + sortie SuperTrend flip."""
-    close = klines_4h[:, 4]
-    high_ = klines_4h[:, 2]
-    low_ = klines_4h[:, 3]
+def manage_short(state: ScannerState, klines_daily: np.ndarray) -> Optional[str]:
+    """Gère un SHORT ouvert — SL fixe + sortie SuperTrend flip (Daily)."""
+    close = klines_daily[:, 4]
+    high_ = klines_daily[:, 2]
+    low_ = klines_daily[:, 3]
     idx = -2
 
     cur_close = close[idx]
@@ -466,7 +466,7 @@ def main():
         "\U0001F47B <b>Phantom Edge V13 Scanner</b>\n"
         "Scan toutes les 5 min sur Binance\n"
         "\U0001F7E2 LONG: 4H (SuperTrend + EMA pullback)\n"
-        "\U0001F534 SHORT: 4H (Pullback EMA21 + EMA200 filter)\n"
+        "\U0001F534 SHORT: Daily (Pullback EMA21 + EMA200 filter)\n"
         f"Max {MAX_DAILY} trades/jour\n"
         "\n"
         "<i>V13 = Best of V11 + V12</i>"
@@ -486,8 +486,9 @@ def main():
 
             can_trade = state.day_trades < MAX_DAILY
 
-            # ── Fetch données 4H ──
+            # ── Fetch données ──
             klines_4h = fetch_klines(SYMBOL, "4h", limit=300)
+            klines_1d = fetch_klines(SYMBOL, "1d", limit=300)
 
             # ── Gestion de position existante ──
             if state.position == "LONG":
@@ -499,7 +500,7 @@ def main():
                     state.save()
 
             elif state.position == "SHORT":
-                exit_msg = manage_short(state, klines_4h)
+                exit_msg = manage_short(state, klines_1d)
                 if exit_msg:
                     msg = format_exit_alert("SHORT", exit_msg, state.entry_price)
                     send_telegram(msg)
@@ -525,8 +526,8 @@ def main():
                         state.save()
 
                 else:
-                    # Vérifier SHORT sur 4H (V13 : pullback, pas cross)
-                    short_sig = check_short(klines_4h, "4H")
+                    # Vérifier SHORT sur Daily uniquement
+                    short_sig = check_short(klines_1d, "1D")
                     if short_sig:
                         msg = format_short_alert(short_sig)
                         if send_telegram(msg):
@@ -536,7 +537,7 @@ def main():
                             state.short_sl = short_sig.sl
                             state.day_trades += 1
                             state.last_signal_time = time.time()
-                            logging.info("ALERTE SHORT envoy\u00e9e @ %.2f (4H)", short_sig.entry)
+                            logging.info("ALERTE SHORT envoy\u00e9e @ %.2f (1D)", short_sig.entry)
                             state.save()
 
             # Log status
