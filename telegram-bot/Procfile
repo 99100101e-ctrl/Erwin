@@ -1,2 +1,1 @@
-web: gunicorn bot:app --bind 0.0.0.0:$PORT
-worker: python btc_scanner.py
+web: gunicorn render_app:app --bind 0.0.0.0:$PORT
