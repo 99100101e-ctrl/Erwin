@@ -39,10 +39,11 @@ exit_mode     = input.string("Close au-dessus EMA rapide", "Mode de sortie",
      options=["Close au-dessus EMA rapide", "Close au-dessus EMA lente", "EMA re-cross haussier"], group=grp3)
 exit_bars     = input.int(2, "Barres consécutives au-dessus pour sortir", group=grp3, minval=1)
 
-grp4 = "Stop Loss — LARGE"
-use_sl        = input.bool(true, "Stop Loss de sécurité", group=grp4)
-sl_pct        = input.float(15.0, "SL (% au-dessus de l'entrée)", step=0.5, group=grp4,
-     tooltip="15% = large. Avec 30% de position, un SL touché = -4.5% de l'equity. Acceptable.")
+grp4 = "Stop Loss"
+use_sl        = input.bool(false, "Stop Loss fixe (désactivé = EMA gère tout)", group=grp4,
+     tooltip="DÉSACTIVÉ par défaut. L'EMA cross retour sert de stop. Activer seulement si vous voulez une sécurité absolue.")
+sl_pct        = input.float(25.0, "SL (% au-dessus de l'entrée)", step=0.5, group=grp4,
+     tooltip="25% = très large. Seulement en cas de flash crash inversé.")
 
 grp5 = "Anti-overtrading"
 min_bars_between = input.int(10, "Min barres entre trades", group=grp5)
@@ -194,7 +195,7 @@ if barstate.islast
 
     // SL
     table.cell(d, 0, 6, "SL", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, use_sl ? str.tostring(sl_pct, "#.0") + "% (= " + str.tostring(sl_pct * 0.3, "#.1") + "% equity)" : "OFF", text_color=use_sl ? color.orange : color.gray, text_size=size.small)
+    table.cell(d, 1, 6, use_sl ? str.tostring(sl_pct, "#.0") + "%" : "EMA exit only", text_color=use_sl ? color.orange : color.green, text_size=size.small)
 
     // Exit
     table.cell(d, 0, 7, "Sortie", text_color=color.white, text_size=size.small)
