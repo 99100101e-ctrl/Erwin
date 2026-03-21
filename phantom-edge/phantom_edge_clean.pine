@@ -1,0 +1,114 @@
+//@version=6
+strategy("Phantom Edge Clean", overlay=true, default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100, commission_type=strategy.commission.percent,
+         commission_value=0.075, slippage=2, initial_capital=10000, pyramiding=0)
+
+// INPUTS
+fvg_min = input.float(0.2, "FVG Min %", step=0.05)
+fvg_age = input.int(40, "FVG Max Bars", minval=10)
+adx_th = input.int(25, "ADX Threshold", minval=10)
+atr_mult_sl = input.float(1.5, "SL Mult (ATR)", step=0.1)
+tp_rr = input.float(2.5, "TP Ratio", step=0.1)
+max_trades = input.int(2, "Max Trades/Day", minval=1)
+use_sess = input.bool(true, "Use Session Filter")
+
+// INDICATORS
+atr_v = ta.atr(14)
+[di_p, di_m, adx_v] = ta.dmi(14, 14)
+vol_ma = ta.sma(volume, 20)
+
+is_trend = adx_v > adx_th
+di_bull = di_p > di_m
+di_bear = di_m > di_p
+
+// SESSION
+hr = hour(time, "UTC")
+in_sess = not use_sess or (hr >= 8 and hr < 12) or (hr >= 13 and hr < 17)
+
+// TRADE COUNTER
+var int trades_day = 0
+if ta.change(dayofmonth(time)) != 0
+    trades_day := 0
+can_trade = trades_day < max_trades
+
+// FVG DETECTION
+fvg_bull = low > high[2] and (low - high[2]) / close * 100 >= fvg_min
+fvg_bear = high < low[2] and (low[2] - high) / close * 100 >= fvg_min
+
+var float fvg_bull_h = na
+var float fvg_bull_l = na
+var int fvg_bull_cnt = 0
+
+var float fvg_bear_h = na
+var float fvg_bear_l = na
+var int fvg_bear_cnt = 0
+
+if fvg_bull
+    fvg_bull_h := low
+    fvg_bull_l := high[2]
+    fvg_bull_cnt := 0
+else
+    fvg_bull_cnt += 1
+
+if fvg_bear
+    fvg_bear_h := low[2]
+    fvg_bear_l := high
+    fvg_bear_cnt := 0
+else
+    fvg_bear_cnt += 1
+
+if fvg_bull_cnt > fvg_age
+    fvg_bull_h := na
+    fvg_bull_l := na
+
+if fvg_bear_cnt > fvg_age
+    fvg_bear_h := na
+    fvg_bear_l := na
+
+price_in_bull_fvg = not na(fvg_bull_h) and low <= fvg_bull_h and close > fvg_bull_l
+price_in_bear_fvg = not na(fvg_bear_h) and high >= fvg_bear_l and close < fvg_bear_h
+
+// S/R
+recent_high = ta.highest(high, 30)
+recent_low = ta.lowest(low, 30)
+near_sup = low <= recent_low * 1.003 and close > recent_low
+near_res = high >= recent_high * 0.997 and close < recent_high
+
+// SWEEP
+recent_h = ta.highest(high, 20)[1]
+recent_l = ta.lowest(low, 20)[1]
+candle_r = high - low
+wick_u = high - math.max(open, close)
+wick_l = math.min(open, close) - low
+
+sweep_l = low < recent_l and close > recent_l and (wick_l / (candle_r + 0.0001)) >= 0.65 and close > open
+sweep_h = high > recent_h and close < recent_h and (wick_u / (candle_r + 0.0001)) >= 0.65 and close < open
+
+// SIGNALS
+long_sig = (price_in_bull_fvg or near_sup or sweep_l) and is_trend and volume > vol_ma and di_bull and in_sess and can_trade and strategy.position_size == 0
+short_sig = (price_in_bear_fvg or near_res or sweep_h) and is_trend and volume > vol_ma and di_bear and in_sess and can_trade and strategy.position_size == 0
+
+// ORDERS
+if long_sig
+    sl = close - atr_v * atr_mult_sl
+    risk = close - sl
+    if risk > 0 and risk < atr_v * 3
+        tp = close + risk * tp_rr
+        trades_day += 1
+        strategy.entry("L", strategy.long)
+        strategy.exit("L", stop=sl, limit=tp)
+
+if short_sig
+    sl = close + atr_v * atr_mult_sl
+    risk = sl - close
+    if risk > 0 and risk < atr_v * 3
+        tp = close - risk * tp_rr
+        trades_day += 1
+        strategy.entry("S", strategy.short)
+        strategy.exit("S", stop=sl, limit=tp)
+
+// VISUALS
+plotshape(long_sig, "LONG", location.belowbar, shape.triangleup, size.normal, color.new(color.green, 0), text="L")
+plotshape(short_sig, "SHORT", location.abovebar, shape.triangledown, size.normal, color.new(color.red, 0), text="S")
+
+bgcolor(is_trend ? color.new(color.blue, 93) : color.new(color.gray, 93))
