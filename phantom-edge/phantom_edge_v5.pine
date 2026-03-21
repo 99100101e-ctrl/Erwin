@@ -1,0 +1,234 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V5 — Multi-Timeframe Trend + Pullback                        ║
+// ║  © Erwin 2026                                                               ║
+// ║                                                                            ║
+// ║  PHILOSOPHIE RADICALEMENT DIFFÉRENTE :                                     ║
+// ║  → On n'entre PAS sur breakout (trop tardif, piège retail)                ║
+// ║  → On entre sur PULLBACK dans le sens du trend 1h                         ║
+// ║  → Trend 1h (EMA 50/200) + Entrée 15m (pullback EMA 21)                  ║
+// ║  → Trailing Stop pour maximiser les winners                               ║
+// ║  → Max 1 trade/jour — qualité absolue                                     ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V5 — MTF Pullback", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "Multi-Timeframe Trend (1h)"
+htf_ema_fast = input.int(50,  "HTF EMA Fast", minval=10, group=grp1)
+htf_ema_slow = input.int(200, "HTF EMA Slow", minval=50, group=grp1)
+
+grp2 = "Pullback Entry (15m)"
+ema_entry = input.int(21, "EMA Pullback (15m)", minval=5, group=grp2)
+ema_trend  = input.int(50, "EMA Trend (15m)", minval=20, group=grp2)
+pullback_atr = input.float(0.5, "Max Pullback Distance (x ATR)", step=0.1, group=grp2)
+
+grp3 = "Confirmation"
+require_engulf = input.bool(true, "Require Engulfing Candle", group=grp3)
+min_body_pct   = input.float(0.4, "Min Candle Body Ratio", step=0.05, group=grp3)
+vol_factor     = input.float(1.2, "Min Volume vs MA", step=0.1, group=grp3)
+
+grp4 = "Risk Management"
+atr_len       = input.int(14, "ATR Period", group=grp4)
+sl_atr        = input.float(2.0, "Initial SL (x ATR)", step=0.1, group=grp4)
+trail_atr     = input.float(1.5, "Trailing Stop (x ATR)", step=0.1, group=grp4)
+use_trail     = input.bool(true, "Use Trailing Stop", group=grp4)
+tp_rr         = input.float(3.0, "TP Ratio (fallback)", step=0.25, group=grp4)
+
+grp5 = "Session"
+use_sess  = input.bool(true, "Session Filter", group=grp5)
+sess_open = input.int(7,  "Session Open (UTC)", group=grp5)
+sess_close = input.int(17, "Session Close (UTC)", group=grp5)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATEURS DE BASE
+// ══════════════════════════════════════════════════════════════════════════════
+
+atr_val = ta.atr(atr_len)
+vol_ma  = ta.sma(volume, 20)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODULE 1 : TREND 1H (Multi-Timeframe via request.security)
+// ══════════════════════════════════════════════════════════════════════════════
+
+htf_close  = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+htf_ema_f  = request.security(syminfo.tickerid, "60", ta.ema(close, htf_ema_fast), lookahead=barmerge.lookahead_off)
+htf_ema_s  = request.security(syminfo.tickerid, "60", ta.ema(close, htf_ema_slow), lookahead=barmerge.lookahead_off)
+
+htf_bull = htf_close > htf_ema_f and htf_ema_f > htf_ema_s  // 1h trend haussier
+htf_bear = htf_close < htf_ema_f and htf_ema_f < htf_ema_s  // 1h trend baissier
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODULE 2 : PULLBACK 15m
+// Retour du prix vers EMA 21 dans le sens du trend
+// ══════════════════════════════════════════════════════════════════════════════
+
+ema21  = ta.ema(close, ema_entry)
+ema50  = ta.ema(close, ema_trend)
+ema200 = ta.ema(close, 200)
+
+// Prix au-dessus de ses EMAs (structure bullish 15m)
+local_bull = close > ema50 and ema50 > ema200
+local_bear = close < ema50 and ema50 < ema200
+
+// Distance du prix à l'EMA 21
+dist_to_ema = math.abs(close - ema21)
+near_ema21  = dist_to_ema <= atr_val * pullback_atr
+
+// Pullback: prix revient sur EMA 21 sans la casser
+pullback_bull = near_ema21 and low <= ema21 * 1.001 and close >= ema21 and local_bull
+pullback_bear = near_ema21 and high >= ema21 * 0.999 and close <= ema21 and local_bear
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODULE 3 : CONFIRMATION DE BOUGIE (Engulfing / Force)
+// ══════════════════════════════════════════════════════════════════════════════
+
+body        = math.abs(close - open)
+candle_size = high - low
+body_ratio  = candle_size > 0 ? body / candle_size : 0.0
+
+// Bougie suffisamment forte (corps > 40% du range)
+strong_candle = body_ratio >= min_body_pct
+
+// Engulfing haussier: bougie verte qui avale la rouge précédente
+engulf_bull = close > open and close > open[1] and open < close[1] and body > body[1] * 0.8
+// Engulfing baissier: bougie rouge qui avale la verte précédente
+engulf_bear = close < open and close < open[1] and open > close[1] and body > body[1] * 0.8
+
+candle_confirm_bull = strong_candle and (not require_engulf or engulf_bull)
+candle_confirm_bear = strong_candle and (not require_engulf or engulf_bear)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODULE 4 : RSI FILTER (éviter entrées en zone extrême)
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsi_val = ta.rsi(close, 14)
+rsi_ok_bull = rsi_val > 40 and rsi_val < 70  // ni oversold ni overbought pour longs
+rsi_ok_bear = rsi_val > 30 and rsi_val < 60  // idem pour shorts
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION + DAILY LIMIT
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+in_session = not use_sess or (hr >= sess_open and hr < sess_close)
+
+var int day_trades = 0
+if ta.change(dayofmonth(time)) != 0
+    day_trades := 0
+can_trade = day_trades < 1  // MAX 1 TRADE PAR JOUR — STRICT
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX FINAUX
+// Toutes conditions doivent être réunies — aucune exception
+// ══════════════════════════════════════════════════════════════════════════════
+
+long_signal = htf_bull and pullback_bull and candle_confirm_bull and rsi_ok_bull and volume > vol_ma * vol_factor and in_session and can_trade and strategy.position_size == 0
+
+short_signal = htf_bear and pullback_bear and candle_confirm_bear and rsi_ok_bear and volume > vol_ma * vol_factor and in_session and can_trade and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GESTION DES ORDRES AVEC TRAILING STOP
+// ══════════════════════════════════════════════════════════════════════════════
+
+trail_offset = atr_val * trail_atr
+
+if long_signal
+    float sl = close - atr_val * sl_atr
+    float risk = close - sl
+    if risk > 0
+        float tp = close + risk * tp_rr
+        day_trades += 1
+        strategy.entry("L", strategy.long)
+        if use_trail
+            strategy.exit("L_exit", "L", stop=sl, trail_offset=trail_offset * syminfo.mintick * 0, trail_points=trail_offset / syminfo.mintick)
+        else
+            strategy.exit("L_exit", "L", stop=sl, limit=tp)
+
+if short_signal
+    float sl = close + atr_val * sl_atr
+    float risk = sl - close
+    if risk > 0
+        float tp = close - risk * tp_rr
+        day_trades += 1
+        strategy.entry("S", strategy.short)
+        if use_trail
+            strategy.exit("S_exit", "S", stop=sl, trail_offset=trail_offset * syminfo.mintick * 0, trail_points=trail_offset / syminfo.mintick)
+        else
+            strategy.exit("S_exit", "S", stop=sl, limit=tp)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(ema21,  "EMA 21",  color.new(color.yellow, 0), linewidth=1)
+plot(ema50,  "EMA 50",  color.new(color.blue, 30), linewidth=2)
+plot(ema200, "EMA 200", color.new(color.white, 40), linewidth=2)
+
+// Signaux
+plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=color.new(color.green, 0), text="▲ L")
+plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=color.new(color.red, 0),   text="▼ S")
+
+// Pullback zones
+plotshape(pullback_bull and htf_bull and not long_signal, title="Pullback Bull", location=location.belowbar, style=shape.circle, size=size.tiny, color=color.new(color.green, 60))
+plotshape(pullback_bear and htf_bear and not short_signal, title="Pullback Bear", location=location.abovebar, style=shape.circle, size=size.tiny, color=color.new(color.red, 60))
+
+// Background HTF trend
+bgcolor(htf_bull ? color.new(color.green, 96) : htf_bear ? color.new(color.red, 96) : color.new(color.gray, 96), title="HTF Trend")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=8, columns=2,
+         bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
+
+    // Header
+    htf_txt = htf_bull ? "BULL ▲" : htf_bear ? "BEAR ▼" : "NEUTRE"
+    htf_col = htf_bull ? color.green : htf_bear ? color.red : color.gray
+    table.cell(d, 0, 0, "PE V5 — MTF", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "Pullback", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+
+    table.cell(d, 0, 1, "Trend 1h", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, htf_txt, text_color=htf_col, text_size=size.small)
+
+    local_txt = local_bull ? "BULL ▲" : local_bear ? "BEAR ▼" : "NEUTRE"
+    local_col = local_bull ? color.green : local_bear ? color.red : color.gray
+    table.cell(d, 0, 2, "Structure 15m", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, local_txt, text_color=local_col, text_size=size.small)
+
+    pb_txt = pullback_bull ? "PULLBACK ↗" : pullback_bear ? "PULLBACK ↘" : "—"
+    pb_col = pullback_bull ? color.green : pullback_bear ? color.red : color.gray
+    table.cell(d, 0, 3, "Pullback EMA21", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, pb_txt, text_color=pb_col, text_size=size.small)
+
+    eng_txt = engulf_bull ? "ENGULF ▲" : engulf_bear ? "ENGULF ▼" : "—"
+    eng_col = engulf_bull ? color.green : engulf_bear ? color.red : color.gray
+    table.cell(d, 0, 4, "Bougie", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, eng_txt, text_color=eng_col, text_size=size.small)
+
+    rsi_col = rsi_val < 35 ? color.orange : rsi_val > 65 ? color.orange : color.white
+    table.cell(d, 0, 5, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, str.tostring(rsi_val, "#.0"), text_color=rsi_col, text_size=size.small)
+
+    vol_col = volume > vol_ma * vol_factor ? color.green : color.gray
+    table.cell(d, 0, 6, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, str.tostring(volume / vol_ma, "#.##") + "x MA", text_color=vol_col, text_size=size.small)
+
+    table.cell(d, 0, 7, "Trade Aujourd'hui", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, day_trades >= 1 ? "DONE" : "DISPO", text_color=day_trades >= 1 ? color.red : color.green, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal,  title="PE V5 LONG",  message="PHANTOM EDGE V5 — LONG {{close}} | Trend 1h BULL | Pullback EMA21")
+alertcondition(short_signal, title="PE V5 SHORT", message="PHANTOM EDGE V5 — SHORT {{close}} | Trend 1h BEAR | Pullback EMA21")
