@@ -465,8 +465,8 @@ def main():
     send_telegram(
         "\U0001F47B <b>Phantom Edge V13 Scanner</b>\n"
         "Scan toutes les 5 min sur Binance\n"
-        "\U0001F7E2 LONG: 4H (SuperTrend + EMA pullback)\n"
-        "\U0001F534 SHORT: Daily (Pullback EMA21 + EMA200 filter)\n"
+        "\U0001F7E2 LONG: 4H + Daily (SuperTrend + EMA pullback)\n"
+        "\U0001F534 SHORT: Daily only (Pullback EMA21 + EMA200 filter)\n"
         f"Max {MAX_DAILY} trades/jour\n"
         "\n"
         "<i>V13 = Best of V11 + V12</i>"
@@ -510,8 +510,10 @@ def main():
 
             # ── Détection nouveaux signaux (uniquement si FLAT) ──
             if state.position == "FLAT" and can_trade:
-                # Vérifier LONG sur 4H
+                # Vérifier LONG sur 4H, puis Daily
                 long_sig = check_long(klines_4h, "4H")
+                if long_sig is None:
+                    long_sig = check_long(klines_1d, "1D")
 
                 if long_sig:
                     msg = format_long_alert(long_sig)
