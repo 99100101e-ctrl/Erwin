@@ -1,19 +1,21 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM SHORT V2 — Retest in Downtrend                                   ║
+// ║  PHANTOM SHORT V4 — Fixed Entries & Exits                                 ║
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
-// ║  V1 ÉCHOUÉE : on shortait les tops → impossible à timer                   ║
+// ║  V3 : filtre daily OK (shorte en période baissière)                       ║
+// ║  MAIS : les trades perdent quand même → problème d'entrée/sortie          ║
 // ║                                                                            ║
-// ║  V2 LOGIQUE : attendre que le DOWNTREND soit confirmé,                    ║
-// ║  puis shorter quand le prix PULLBACK vers une résistance (EMA)            ║
-// ║  et se fait REJETER.                                                       ║
-// ║                                                                            ║
-// ║  = shorter les retests, PAS les tops.                                     ║
-// ║  = on ne prédit rien, on suit le mouvement baissier déjà en cours.        ║
+// ║  V4 corrections :                                                          ║
+// ║  1. Entrée plus stricte : bearish engulfing OU pin bar confirmée          ║
+// ║     (pas juste "touche l'EMA")                                            ║
+// ║  2. Confirmation : bougie CLÔTURÉE sous l'EMA (pas juste mèche)          ║
+// ║  3. SL plus large (3x ATR) pour survivre aux bear market rallies         ║
+// ║  4. TP en R:R 2:1 minimum                                                ║
+// ║  5. Anti-overtrading strict : 1 trade tous les 3 jours minimum           ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
-strategy("Phantom Short V2 — Retest Downtrend", overlay=true,
+strategy("Phantom Short V4 — Fixed Entries", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      commission_type=strategy.commission.percent, commission_value=0.075,
      slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
@@ -22,161 +24,139 @@ strategy("Phantom Short V2 — Retest Downtrend", overlay=true,
 // PARAMÈTRES
 // ══════════════════════════════════════════════════════════════════════════════
 
-grp1 = "Trend Filter — Downtrend Confirmation"
-ema_fast_len  = input.int(21,   "EMA rapide",      group=grp1)
-ema_mid_len   = input.int(50,   "EMA moyenne",     group=grp1)
-ema_slow_len  = input.int(200,  "EMA lente",       group=grp1)
-require_death = input.bool(false, "Exiger Death Cross (EMA50 < EMA200)", group=grp1,
-     tooltip="Si activé, exige EMA50 sous EMA200. Si désactivé, prix sous EMA50 suffit.")
+grp1 = "DAILY Trend Filter"
+d_ema_len     = input.int(50,   "Daily EMA Period",   group=grp1)
+d_slope_bars  = input.int(10,   "Slope lookback",     group=grp1)
 
-grp2 = "Pullback Entry — Retest de résistance"
-retest_target = input.string("EMA 21", "Zone de retest", options=["EMA 21", "EMA 50"], group=grp2,
-     tooltip="Le prix doit remonter TOUCHER cette EMA puis être rejeté")
-touch_pct     = input.float(0.3, "Tolérance toucher EMA (%)", step=0.1, group=grp2,
-     tooltip="Le prix doit être à moins de X% de l'EMA cible pour compter comme toucher")
-require_rej   = input.bool(true, "Bougie de rejet requise", group=grp2)
-rsi_len       = input.int(14,   "RSI Period", group=grp2)
-rsi_max       = input.float(55, "RSI max (pas survendu)", step=5.0, group=grp2,
-     tooltip="Éviter de shorter quand RSI déjà très bas = le move est fini")
-rsi_min       = input.float(35, "RSI min (plancher)", step=5.0, group=grp2,
-     tooltip="Ne pas shorter si RSI déjà en oversold")
+grp2 = "4H Entry — STRICT"
+ema_fast_len  = input.int(21,   "EMA 4H rapide",       group=grp2)
+ema_mid_len   = input.int(50,   "EMA 4H moyenne",      group=grp2)
+entry_type    = input.string("Engulfing + EMA", "Type d'entrée",
+     options=["Engulfing + EMA", "Pin Bar + EMA", "Les deux"], group=grp2,
+     tooltip="Engulfing = bougie rouge qui avale la précédente à l'EMA\nPin Bar = grande mèche haute à l'EMA")
+close_below   = input.bool(true, "Clôture SOUS l'EMA requise", group=grp2,
+     tooltip="La bougie doit CLÔTURER sous l'EMA, pas juste la toucher avec une mèche")
 
-grp3 = "Confirmation supplémentaire"
-use_macd      = input.bool(true,  "MACD doit être négatif", group=grp3)
-macd_fast     = input.int(12, "MACD Fast", group=grp3)
-macd_slow     = input.int(26, "MACD Slow", group=grp3)
-macd_sig      = input.int(9,  "MACD Signal", group=grp3)
-use_vol       = input.bool(false, "Volume > moyenne", group=grp3)
-vol_len       = input.int(20, "Volume MA Period", group=grp3)
+grp3 = "Momentum"
+rsi_len       = input.int(14,   "RSI Period", group=grp3)
+rsi_max       = input.float(55, "RSI max", step=5.0, group=grp3)
+rsi_min       = input.float(20, "RSI min", step=5.0, group=grp3)
 
-grp4 = "Risk Management"
-atr_len       = input.int(14,    "ATR Period",              group=grp4)
-sl_atr_mult   = input.float(1.5, "SL (x ATR) au-dessus du retest", step=0.25, group=grp4)
-tp_atr_mult   = input.float(2.5, "TP (x ATR)",              step=0.25, group=grp4,
-     tooltip="TP plus grand que V1 car on est DANS le trend")
+grp4 = "Risk — LARGE STOPS (bear market rallies)"
+atr_len       = input.int(14,    "ATR Period",     group=grp4)
+sl_atr_mult   = input.float(3.0, "SL (x ATR)",     step=0.25, group=grp4,
+     tooltip="SL large pour absorber les mèches et rallies. Bear markets = volatilité extrême.")
+rr_ratio      = input.float(2.0, "Risk:Reward ratio", step=0.25, group=grp4,
+     tooltip="TP = SL × R:R. Avec SL=3 ATR et R:R=2, TP = 6 ATR")
 use_trailing   = input.bool(true, "Trailing Stop", group=grp4)
-trail_atr_mult = input.float(2.0, "Trail (x ATR)", step=0.25, group=grp4)
-max_bars      = input.int(20,    "Max barres en position",   group=grp4)
+trail_atr_mult = input.float(3.0, "Trail (x ATR)", step=0.25, group=grp4)
+max_bars      = input.int(40,    "Max barres",      group=grp4)
 
-grp5 = "Filtres"
-max_daily     = input.int(2,  "Max Trades/Jour", group=grp5)
+grp5 = "Anti-overtrading STRICT"
+min_bars_between = input.int(18, "Min barres entre trades (18 = 3 jours en 4H)", group=grp5)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// INDICATEURS
+// DAILY TREND (HTF)
+// ══════════════════════════════════════════════════════════════════════════════
+
+d_ema     = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema_len), lookahead=barmerge.lookahead_off)
+d_close   = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+d_ema_old = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema_len)[d_slope_bars], lookahead=barmerge.lookahead_off)
+
+daily_bearish = d_close < d_ema and d_ema < d_ema_old
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 4H INDICATORS
 // ══════════════════════════════════════════════════════════════════════════════
 
 ema_fast = ta.ema(close, ema_fast_len)
 ema_mid  = ta.ema(close, ema_mid_len)
-ema_slow = ta.ema(close, ema_slow_len)
 atr_val  = ta.atr(atr_len)
 rsi_val  = ta.rsi(close, rsi_len)
+[macd_line, signal_line, macd_hist] = ta.macd(close, 12, 26, 9)
 
-[macd_line, signal_line, macd_hist] = ta.macd(close, macd_fast, macd_slow, macd_sig)
-vol_ma = ta.sma(volume, vol_len)
-
-// EMA cible pour le retest
-ema_target = retest_target == "EMA 21" ? ema_fast : ema_mid
+// Structure 4H baissière
+local_bearish = ema_fast < ema_mid
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 1. TREND FILTER — sommes-nous en DOWNTREND ?
+// ENTRY PATTERNS — beaucoup plus stricts que V3
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Prix sous EMA 50 (minimum requis)
-price_below_mid = close < ema_mid
+// === BEARISH ENGULFING à l'EMA ===
+// Bougie actuelle rouge, avale le corps de la précédente, haute touche/dépasse l'EMA
+prev_green  = close[1] > open[1]
+curr_red    = close < open
+engulfs     = close < open[1] and open > close[1]  // corps rouge avale le vert
+at_ema_eng  = high >= ema_fast * 0.997 or high >= ema_mid * 0.997  // touche l'EMA (0.3% tolérance)
+bearish_engulfing = prev_green and curr_red and engulfs and at_ema_eng
 
-// EMA 21 sous EMA 50 (structure baissière)
-ema_bearish_stack = ema_fast < ema_mid
-
-// Death cross optionnel (EMA 50 sous EMA 200)
-death_cross_ok = not require_death or ema_mid < ema_slow
-
-// EMA 50 en pente descendante (confirmé que le trend descend)
-ema_mid_slope = ema_mid - ema_mid[5]
-ema_declining = ema_mid_slope < 0
-
-// Downtrend confirmé
-downtrend = price_below_mid and ema_bearish_stack and death_cross_ok and ema_declining
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 2. PULLBACK — le prix remonte toucher l'EMA résistance
-// ══════════════════════════════════════════════════════════════════════════════
-
-// Le prix touche (ou presque) l'EMA cible depuis en-dessous
-dist_to_target = math.abs(high - ema_target) / ema_target * 100
-touching_ema = dist_to_target <= touch_pct or high >= ema_target
-
-// Le prix doit avoir été EN-DESSOUS avant (c'est un pullback UP, pas juste un cross)
-was_below = close[1] < ema_target or close[2] < ema_target
-
-pullback_to_resistance = touching_ema and was_below
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 3. REJECTION — bougie de rejet à la résistance
-// ══════════════════════════════════════════════════════════════════════════════
-
+// === PIN BAR (rejet) à l'EMA ===
+// Grande mèche haute (>50% du range), petit corps, haute touche l'EMA
 wick_up      = high - math.max(open, close)
+wick_dn      = math.min(open, close) - low
 body_size    = math.abs(close - open)
 candle_range = high - low
-bearish_close = close < open
+at_ema_pin   = high >= ema_fast * 0.997 or high >= ema_mid * 0.997
+pin_bar      = candle_range > 0 and wick_up > candle_range * 0.5 and wick_up > body_size * 2.0 and at_ema_pin
 
-// Rejet : grande mèche haute + clôture baissière OU corps rouge significatif
-rejection = candle_range > 0 and (
-     (wick_up > body_size and wick_up > candle_range * 0.35) or
-     (bearish_close and body_size > candle_range * 0.5)
-     )
+// Pattern sélectionné
+pattern_ok = switch entry_type
+    "Engulfing + EMA" => bearish_engulfing
+    "Pin Bar + EMA"   => pin_bar
+    "Les deux"        => bearish_engulfing or pin_bar
 
-cond_reject = not require_rej or rejection
+// === CLÔTURE SOUS L'EMA (confirmation) ===
+close_confirmed = not close_below or (close < ema_fast and close < ema_mid)
 
-// ══════════════════════════════════════════════════════════════════════════════
-// 4. CONFIRMATIONS
-// ══════════════════════════════════════════════════════════════════════════════
-
-// RSI dans une zone exploitable (ni trop haut = pas de short, ni trop bas = déjà terminé)
-cond_rsi = rsi_val <= rsi_max and rsi_val >= rsi_min
-
-// MACD négatif = momentum baissier
-cond_macd = not use_macd or macd_line < 0
-
-// Volume
-cond_vol = not use_vol or volume > vol_ma
+// === PRIX VENAIT D'EN-DESSOUS (c'est un pullback UP, pas une chute continue) ===
+was_lower  = low[1] < low[2] or low[2] < low[3]  // on venait de plus bas
+came_up    = high > high[2]                         // on est remonté
 
 // ══════════════════════════════════════════════════════════════════════════════
-// DAILY LIMIT
+// MOMENTUM
 // ══════════════════════════════════════════════════════════════════════════════
 
-var int day_trades = 0
-if ta.change(dayofmonth(time)) != 0
-    day_trades := 0
-can_trade = day_trades < max_daily
+cond_rsi  = rsi_val <= rsi_max and rsi_val >= rsi_min
+cond_macd = macd_line < 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COOLDOWN
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int bars_since_trade = 999
+bars_since_trade += 1
+cooldown_ok = bars_since_trade >= min_bars_between
 no_pos = strategy.position_size == 0
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SIGNAL SHORT
+// SIGNAL
 // ══════════════════════════════════════════════════════════════════════════════
 
-short_signal = downtrend and pullback_to_resistance and cond_reject and cond_rsi and cond_macd and cond_vol and can_trade and no_pos
+short_signal = daily_bearish and local_bearish and pattern_ok and close_confirmed and cond_rsi and cond_macd and cooldown_ok and no_pos
 
 // ══════════════════════════════════════════════════════════════════════════════
-// GESTION DES ORDRES
+// ORDRES
 // ══════════════════════════════════════════════════════════════════════════════
 
 var int bars_in_trade = 0
 
 if short_signal
-    // SL au-dessus du high de la bougie de rejet (là où le retest a été rejeté)
-    float sl_level = high + atr_val * sl_atr_mult
-    float tp_level = close - atr_val * tp_atr_mult
+    float risk    = atr_val * sl_atr_mult
+    float sl_level = close + risk
+    float tp_level = close - risk * rr_ratio
 
-    day_trades += 1
     bars_in_trade := 0
+    bars_since_trade := 0
+
     strategy.entry("S", strategy.short)
 
     if use_trailing
-        strategy.exit("S_exit", "S", stop=sl_level, limit=tp_level, trail_points=atr_val * trail_atr_mult / syminfo.mintick, trail_offset=atr_val * trail_atr_mult / syminfo.mintick)
+        strategy.exit("S_exit", "S", stop=sl_level, limit=tp_level,
+             trail_points=atr_val * trail_atr_mult / syminfo.mintick,
+             trail_offset=atr_val * trail_atr_mult / syminfo.mintick)
     else
         strategy.exit("S_exit", "S", stop=sl_level, limit=tp_level)
 
-// Compteur de barres
 if strategy.position_size < 0
     bars_in_trade += 1
 
@@ -184,26 +164,31 @@ if strategy.position_size < 0
 if strategy.position_size < 0 and bars_in_trade >= max_bars
     strategy.close("S", comment="Timeout")
 
-// Sortie si le trend se retourne (sécurité)
-if strategy.position_size < 0 and close > ema_mid and not ema_declining
-    strategy.close("S", comment="Trend Flip")
+// Trend flip → sortie
+if strategy.position_size < 0 and not daily_bearish
+    strategy.close("S", comment="Daily Flip")
 
 // ══════════════════════════════════════════════════════════════════════════════
 // AFFICHAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
-plot(ema_fast, "EMA 21",  color.new(color.yellow, 20), linewidth=1)
-plot(ema_mid,  "EMA 50",  color.new(color.aqua, 20),   linewidth=2)
-plot(ema_slow, "EMA 200", color.new(color.white, 40),   linewidth=2)
+plot(ema_fast, "EMA 21",     color.new(color.yellow, 20), linewidth=1)
+plot(ema_mid,  "EMA 50",     color.new(color.aqua, 20),   linewidth=2)
+plot(d_ema,    "Daily EMA50", color.new(color.fuchsia, 20), linewidth=3, style=plot.style_stepline)
 
-// Colorer le fond quand downtrend confirmé
-bgcolor(downtrend ? color.new(color.red, 93) : na, title="Downtrend Zone")
+bgcolor(daily_bearish ? color.new(color.red, 93) : na, title="Daily Bear Zone")
 
-// Signaux
-plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=#FF4444, text="SHORT")
+// Patterns détectés (pour debug)
+plotshape(bearish_engulfing and daily_bearish and not short_signal and no_pos,
+     title="Engulfing", location=location.abovebar, style=shape.diamond,
+     size=size.tiny, color=color.new(color.orange, 30), text="E")
+plotshape(pin_bar and daily_bearish and not short_signal and no_pos,
+     title="Pin", location=location.abovebar, style=shape.diamond,
+     size=size.tiny, color=color.new(color.purple, 30), text="P")
 
-// Pullbacks vers résistance (quand downtrend mais pas encore de rejet)
-plotshape(downtrend and touching_ema and not short_signal and no_pos, title="Retest", location=location.abovebar, style=shape.diamond, size=size.tiny, color=color.new(color.orange, 40), text="R")
+// Signal SHORT
+plotshape(short_signal, title="SHORT", location=location.abovebar,
+     style=shape.triangledown, size=size.large, color=#FF4444, text="SHORT")
 
 // ══════════════════════════════════════════════════════════════════════════════
 // DASHBOARD
@@ -213,49 +198,39 @@ if barstate.islast
     var table d = table.new(position=position.top_right, rows=9, columns=2,
          bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
 
-    table.cell(d, 0, 0, "PHANTOM", bgcolor=color.new(#CC0000, 20), text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 0, "SHORT V2", bgcolor=color.new(#CC0000, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 0, 0, "PHANTOM", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "SHORT V4", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
 
-    // Trend
-    trend_txt = downtrend ? "DOWNTREND" : "NO TREND"
-    trend_col = downtrend ? color.red : color.gray
-    table.cell(d, 0, 1, "Trend", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 1, trend_txt, text_color=trend_col, text_size=size.small)
+    table.cell(d, 0, 1, "Daily Trend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, daily_bearish ? "BEARISH" : "NO SHORT", text_color=daily_bearish ? color.red : color.green, text_size=size.small)
 
-    // EMA Stack
-    stack_txt = ema_bearish_stack ? "EMA21 < EMA50" : "—"
-    table.cell(d, 0, 2, "Stack", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 2, stack_txt, text_color=ema_bearish_stack ? color.red : color.gray, text_size=size.small)
+    table.cell(d, 0, 2, "4H Stack", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, local_bearish ? "Bear" : "Bull", text_color=local_bearish ? color.red : color.green, text_size=size.small)
 
-    // EMA Slope
-    table.cell(d, 0, 3, "EMA50 Slope", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 3, ema_declining ? "Declining" : "Rising", text_color=ema_declining ? color.red : color.green, text_size=size.small)
+    table.cell(d, 0, 3, "Pattern", text_color=color.white, text_size=size.small)
+    p_txt = bearish_engulfing ? "ENGULFING" : pin_bar ? "PIN BAR" : "—"
+    table.cell(d, 1, 3, p_txt, text_color=pattern_ok ? color.red : color.gray, text_size=size.small)
 
-    // Retest
-    table.cell(d, 0, 4, "Retest " + retest_target, text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 4, touching_ema ? "TOUCHÉ" : str.tostring(dist_to_target, "#.1") + "%", text_color=touching_ema ? color.red : color.gray, text_size=size.small)
+    table.cell(d, 0, 4, "Close < EMA", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, close_confirmed ? "OUI" : "NON", text_color=close_confirmed ? color.red : color.gray, text_size=size.small)
 
-    // RSI
-    rsi_col = cond_rsi ? color.white : color.red
     table.cell(d, 0, 5, "RSI", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 5, str.tostring(rsi_val, "#.0"), text_color=rsi_col, text_size=size.small)
+    table.cell(d, 1, 5, str.tostring(rsi_val, "#.0"), text_color=cond_rsi ? color.white : color.red, text_size=size.small)
 
-    // MACD
-    table.cell(d, 0, 6, "MACD", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, macd_line < 0 ? "Bearish" : "Bullish", text_color=macd_line < 0 ? color.red : color.green, text_size=size.small)
+    table.cell(d, 0, 6, "R:R", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, "1:" + str.tostring(rr_ratio, "#.0"), text_color=color.white, text_size=size.small)
 
-    // Position
     pos_txt = strategy.position_size < 0 ? "SHORT (" + str.tostring(bars_in_trade) + "/" + str.tostring(max_bars) + ")" : "FLAT"
-    pos_col = strategy.position_size < 0 ? color.red : color.gray
     table.cell(d, 0, 7, "Position", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 7, pos_txt, text_color=pos_col, text_size=size.small)
+    table.cell(d, 1, 7, pos_txt, text_color=strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
 
-    table.cell(d, 0, 8, "Trades/Jour", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 8, str.tostring(day_trades) + "/" + str.tostring(max_daily), text_color=day_trades >= max_daily ? color.red : color.white, text_size=size.small)
+    table.cell(d, 0, 8, "Cooldown", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 8, cooldown_ok ? "OK" : str.tostring(min_bars_between - bars_since_trade) + " bars", text_color=cooldown_ok ? color.green : color.orange, text_size=size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ALERTES
 // ══════════════════════════════════════════════════════════════════════════════
 
-alertcondition(short_signal, title="PS V2 SHORT", message="PHANTOM SHORT V2 — Retest rejeté en downtrend | {{close}}")
-alertcondition(downtrend and not downtrend[1], title="Downtrend Start", message="DOWNTREND confirmé — shorts activés | {{close}}")
+alertcondition(short_signal, title="PS V4 SHORT", message="PHANTOM SHORT V4 — {{close}}")
+alertcondition(daily_bearish and not daily_bearish[1], title="Bear Start", message="Daily BEARISH — shorts ON")
+alertcondition(not daily_bearish and daily_bearish[1], title="Bear End", message="Daily BULLISH — shorts OFF")
