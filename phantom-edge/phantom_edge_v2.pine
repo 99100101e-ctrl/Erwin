@@ -226,11 +226,11 @@ if final_long and strategy.position_size < 0
 
 // FVG zones
 if show_fvg and fvg_bull_detected
-    box.new(bar_index - 2, fvg_bull_high, bar_index + 30, fvg_bull_low,
+    box.new(left=bar_index - 2, top=fvg_bull_high, right=bar_index + 30, bottom=fvg_bull_low,
          border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 85))
 
 if show_fvg and fvg_bear_detected
-    box.new(bar_index - 2, fvg_bear_high, bar_index + 30, fvg_bear_low,
+    box.new(left=bar_index - 2, top=fvg_bear_high, right=bar_index + 30, bottom=fvg_bear_low,
          border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 85))
 
 // S/R
