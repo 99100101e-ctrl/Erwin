@@ -489,8 +489,8 @@ if show_dash and barstate.islast
 // 12. ALERTES
 // ══════════════════════════════════════════════════════════════════════════════
 
-alertcondition(long_signal,  title="PE LONG",  message="PHANTOM EDGE LONG {{close}} | " + sig_type)
-alertcondition(short_signal, title="PE SHORT", message="PHANTOM EDGE SHORT {{close}} | " + sig_type)
+alertcondition(long_signal,  title="PE LONG",  message="PHANTOM EDGE LONG {{close}}")
+alertcondition(short_signal, title="PE SHORT", message="PHANTOM EDGE SHORT {{close}}")
 alertcondition(phantom_long or phantom_short, title="PHANTOM",  message="⚡ PHANTOM CONFLUENCE {{close}}")
 alertcondition(sweep_lows or sweep_highs,     title="SWEEP",    message="Liquidity Sweep detected {{close}}")
 alertcondition(bull_absorption or bear_absorption, title="ABSORB", message="Volume Absorption {{close}}")
