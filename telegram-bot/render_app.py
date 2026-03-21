@@ -19,14 +19,20 @@ Deploy sur Render :
 """
 
 import os
+import time
 import threading
 import logging
 from datetime import datetime, timezone
 
+import requests
 from flask import Flask, jsonify
 
 # Import du scanner V11 (identique au Pine Script Phantom Edge V11 — Unified)
 from btc_scanner import main as scanner_main, ScannerState, STATE_FILE
+
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -82,12 +88,69 @@ def position():
     return jsonify(info), 200
 
 
+def send_status_reply(chat_id: str):
+    """Envoie le status actuel du scanner via Telegram."""
+    state = ScannerState.load()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    if state.position == "FLAT":
+        pos_info = "FLAT (en attente de signal)"
+    elif state.position == "LONG":
+        pnl = f" | Trail: {state.trail_long:,.0f}" if state.trail_long else ""
+        pos_info = f"LONG @ {state.entry_price:,.2f}{pnl}"
+    else:
+        pos_info = f"SHORT @ {state.entry_price:,.2f} | Bars: {state.short_bars_in}"
+
+    text = (
+        "\U0001F4CA <b>Phantom Edge V11 — Status</b>\n"
+        f"\n"
+        f"\U0001F534 Position: {pos_info}\n"
+        f"\U0001F4C8 Trades aujourd'hui: {state.day_trades}/3\n"
+        f"\U0000231A {now} UTC\n"
+        f"\n"
+        f"\u2705 Scanner actif — scan toutes les 5 min"
+    )
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }, timeout=10)
+    except Exception as e:
+        logging.error("Erreur envoi status: %s", e)
+
+
+def poll_telegram_commands():
+    """Poll les messages Telegram pour répondre aux commandes /status."""
+    last_update_id = 0
+    while True:
+        try:
+            resp = requests.get(f"{TELEGRAM_API}/getUpdates", params={
+                "offset": last_update_id + 1,
+                "timeout": 30,
+            }, timeout=35)
+            if resp.ok:
+                for update in resp.json().get("result", []):
+                    last_update_id = update["update_id"]
+                    msg = update.get("message", {})
+                    text = msg.get("text", "")
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    if text in ("/status", "/start"):
+                        send_status_reply(chat_id)
+        except Exception as e:
+            logging.warning("Poll Telegram error: %s", e)
+            time.sleep(10)
+
+
 def start_scanner():
     """Lance le scanner dans un thread daemon."""
     logging.info("Lancement du scanner V11 en arriere-plan...")
     scanner_main()
 
 
-# Lancer le scanner au démarrage de l'app
+# Lancer le scanner + polling Telegram au démarrage
 scanner_thread = threading.Thread(target=start_scanner, daemon=True)
 scanner_thread.start()
+
+telegram_thread = threading.Thread(target=poll_telegram_commands, daemon=True)
+telegram_thread.start()
