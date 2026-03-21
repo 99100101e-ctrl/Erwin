@@ -1,0 +1,302 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V2 — Simplified & Profitable                                 ║
+// ║  © Erwin 2026 — Vrai stratégie day trading                                 ║
+// ║                                                                            ║
+// ║  Sans Hurst (trop complexe). À la place :                                 ║
+// ║  1. Fair Value Gaps (FVG) → zones de déséquilibre prix                    ║
+// ║  2. Liquidity Sweep → faux breakouts (piège retail)                       ║
+// ║  3. ADX → régime trending vs ranging                                      ║
+// ║  4. Support/Résistance + Volume → confluence                              ║
+// ║  5. Moins de trades, mieux sélectionnés                                   ║
+// ║                                                                            ║
+// ║  Timeframe : 15m | Instrument : BTCUSDT                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V2", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "Fair Value Gaps"
+fvg_min_size   = input.float(0.20, "FVG min size (%)", step=0.05, group=grp1)
+fvg_max_bars   = input.int(40, "FVG max age (bars)", minval=10, group=grp1)
+
+grp2 = "Liquidity Sweep"
+sweep_lookback = input.int(20, "Sweep lookback (bars)", minval=10, group=grp2)
+sweep_wick_min = input.float(0.65, "Sweep wick ratio min", step=0.05, group=grp2)
+
+grp3 = "ADX & Trend"
+adx_period     = input.int(14, "ADX period", minval=5, group=grp3)
+adx_threshold  = input.int(25, "ADX threshold (trend)", minval=10, group=grp3)
+
+grp4 = "Support/Resistance"
+sr_lookback    = input.int(30, "S/R lookback (bars)", minval=10, group=grp4)
+sr_proximity   = input.float(0.003, "Near S/R distance (%)", step=0.001, group=grp4)
+
+grp5 = "Risk Management"
+atr_len        = input.int(14, "ATR period", group=grp5)
+sl_atr_mult    = input.float(1.5, "SL (x ATR)", step=0.1, group=grp5)
+tp_rr          = input.float(2.5, "TP ratio (x Risk)", step=0.1, group=grp5)
+max_daily      = input.int(2, "Max trades/day", minval=1, group=grp5)
+
+grp6 = "Session"
+use_session    = input.bool(true, "Use session filter", group=grp6)
+london_start   = input.int(8, "London start (UTC)", group=grp6)
+london_end     = input.int(12, "London end (UTC)", group=grp6)
+ny_start       = input.int(13, "NY start (UTC)", group=grp6)
+ny_end         = input.int(17, "NY end (UTC)", group=grp6)
+
+grp7 = "Display"
+show_fvg       = input.bool(true, "Show FVG", group=grp7)
+show_sr        = input.bool(true, "Show S/R", group=grp7)
+show_sweep     = input.bool(true, "Show Sweep", group=grp7)
+show_dash      = input.bool(true, "Show Dashboard", group=grp7)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATEURS
+// ══════════════════════════════════════════════════════════════════════════════
+
+atr_val = ta.atr(atr_len)
+
+// ADX
+[di_plus, di_minus, adx_val] = ta.dmi(adx_period, adx_period)
+is_trending = adx_val > adx_threshold
+is_ranging = not is_trending
+
+// Volumes
+vol_ma = ta.sma(volume, 20)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FAIR VALUE GAPS (FVG)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Bullish FVG: gap haussier (candle[2].high < candle[0].low)
+fvg_bull_detected = low > high[2] and (low - high[2]) / close * 100 >= fvg_min_size
+
+// Bearish FVG: gap baissier (candle[2].low > candle[0].high)
+fvg_bear_detected = high < low[2] and (low[2] - high) / close * 100 >= fvg_min_size
+
+// Track active FVGs
+var float fvg_bull_high = na
+var float fvg_bull_low = na
+var float fvg_bull_age = 0.0
+
+var float fvg_bear_high = na
+var float fvg_bear_low = na
+var float fvg_bear_age = 0.0
+
+if fvg_bull_detected
+    fvg_bull_high := low
+    fvg_bull_low := high[2]
+    fvg_bull_age := 0
+if fvg_bear_detected
+    fvg_bear_high := low[2]
+    fvg_bear_low := high
+    fvg_bear_age := 0
+
+// Age FVGs
+fvg_bull_age := na(fvg_bull_high) ? na : fvg_bull_age + 1
+fvg_bear_age := na(fvg_bear_high) ? na : fvg_bear_age + 1
+
+// Invalidate if age > max
+if fvg_bull_age > fvg_max_bars
+    fvg_bull_high := na
+    fvg_bull_low := na
+if fvg_bear_age > fvg_max_bars
+    fvg_bear_high := na
+    fvg_bear_low := na
+
+// Price enters FVG (retest)
+price_in_bull_fvg = not na(fvg_bull_high) and low <= fvg_bull_high and close > fvg_bull_low
+price_in_bear_fvg = not na(fvg_bear_high) and high >= fvg_bear_low and close < fvg_bear_high
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUPPORT & RESISTANCE (Swing Points)
+// ══════════════════════════════════════════════════════════════════════════════
+
+recent_high = ta.highest(high, sr_lookback)
+recent_low = ta.lowest(low, sr_lookback)
+
+// Bounce on S/R
+near_support = low <= recent_low * (1 + sr_proximity) and close > recent_low
+near_resist = high >= recent_high * (1 - sr_proximity) and close < recent_high
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY SWEEP (Faux Breakout)
+// ══════════════════════════════════════════════════════════════════════════════
+
+recent_swing_high = ta.highest(high, sweep_lookback)[1]
+recent_swing_low = ta.lowest(low, sweep_lookback)[1]
+
+candle_range = high - low
+upper_wick = high - math.max(open, close)
+lower_wick = math.min(open, close) - low
+
+// Sweep lows: break low → long wick → close above
+sweep_lows = (low < recent_swing_low) and (close > recent_swing_low) and
+     (lower_wick / (candle_range + 0.0001) >= sweep_wick_min) and
+     (close > open)
+
+// Sweep highs: break high → long wick → close below
+sweep_highs = (high > recent_swing_high) and (close < recent_swing_high) and
+     (upper_wick / (candle_range + 0.0001) >= sweep_wick_min) and
+     (close < open)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+london = hr >= london_start and hr < london_end
+ny = hr >= ny_start and hr < ny_end
+in_session = not use_session or london or ny
+
+// Daily counter
+var int day_trades = 0
+if ta.change(dayofmonth(time)) != 0
+    day_trades := 0
+can_trade = day_trades < max_daily
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNALS — Simples et Fiables
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG: FVG retest + trending + volume + (ADX or bounce)
+long_signal = (price_in_bull_fvg or near_support) and
+     is_trending and
+     volume > vol_ma and
+     (di_plus > di_minus) and
+     in_session and
+     can_trade and
+     strategy.position_size == 0
+
+// SHORT: FVG retest + trending + volume + (ADX or bounce)
+short_signal = (price_in_bear_fvg or near_resist) and
+     is_trending and
+     volume > vol_ma and
+     (di_minus > di_plus) and
+     in_session and
+     can_trade and
+     strategy.position_size == 0
+
+// Alternative: Sweep-based entries (more aggressive)
+sweep_long = sweep_lows and volume > vol_ma and close > ta.ema(close, 20) and in_session and can_trade and strategy.position_size == 0
+sweep_short = sweep_highs and volume > vol_ma and close < ta.ema(close, 20) and in_session and can_trade and strategy.position_size == 0
+
+// Final signals (prioritize FVG/SR over sweep)
+final_long = long_signal or sweep_long
+final_short = short_signal or sweep_short
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORDER MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════════════
+
+if final_long
+    float sl = close - atr_val * sl_atr_mult
+    float risk = close - sl
+    if risk > 0 and risk < atr_val * 3
+        float tp = close + risk * tp_rr
+        day_trades += 1
+        strategy.entry("L", strategy.long)
+        strategy.exit("L_exit", "L", stop=sl, limit=tp)
+
+if final_short
+    float sl = close + atr_val * sl_atr_mult
+    float risk = sl - close
+    if risk > 0 and risk < atr_val * 3
+        float tp = close - risk * tp_rr
+        day_trades += 1
+        strategy.entry("S", strategy.short)
+        strategy.exit("S_exit", "S", stop=sl, limit=tp)
+
+// Close on reversal
+if final_short and strategy.position_size > 0
+    strategy.close("L")
+if final_long and strategy.position_size < 0
+    strategy.close("S")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DISPLAY
+// ══════════════════════════════════════════════════════════════════════════════
+
+// FVG zones
+if show_fvg and fvg_bull_detected
+    box.new(left=bar_index - 2, top=fvg_bull_high, right=bar_index + 30, bottom=fvg_bull_low,
+         border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 85))
+
+if show_fvg and fvg_bear_detected
+    box.new(left=bar_index - 2, top=fvg_bear_high, right=bar_index + 30, bottom=fvg_bear_low,
+         border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 85))
+
+// S/R
+plot(show_sr ? recent_high : na, "Resistance", color.new(color.red, 70), linewidth=1, style=plot.style_stepline)
+plot(show_sr ? recent_low : na, "Support", color.new(color.green, 70), linewidth=1, style=plot.style_stepline)
+
+// Signals
+plotshape(show_sweep and sweep_lows, title="Sweep Long", location=location.belowbar, style=shape.diamond, size=size.small, color=color.new(color.lime, 0), text="SW↑")
+plotshape(show_sweep and sweep_highs, title="Sweep Short", location=location.abovebar, style=shape.diamond, size=size.small, color=color.new(color.orange, 0), text="SW↓")
+
+plotshape(final_long, title="LONG", location=location.belowbar, style=shape.triangleup, size=size.normal, color=color.new(color.green, 0), text="L")
+plotshape(final_short, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.new(color.red, 0), text="S")
+
+// ADX background
+bgcolor(is_trending ? color.new(color.blue, 93) : color.new(color.purple, 93), title="Trend")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if show_dash and barstate.islast
+    var table d = table.new(position=position.top_right, rows=8, columns=2, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(#444444, 0))
+
+    table.cell(d, 0, 0, "PE V2", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
+    table.cell(d, 1, 0, "Simplified", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
+
+    // ADX
+    adx_col = is_trending ? color.blue : color.gray
+    table.cell(d, 0, 1, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, str.tostring(adx_val, "#.0") + (is_trending ? " TREND" : " RANGE"), text_color=adx_col, text_size=size.small)
+
+    // DI
+    di_col = di_plus > di_minus ? color.green : color.red
+    table.cell(d, 0, 2, "DI+/DI-", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, str.tostring(di_plus, "#.0") + "/" + str.tostring(di_minus, "#.0"), text_color=di_col, text_size=size.small)
+
+    // FVG
+    fvg_txt = not na(fvg_bull_high) ? "BULL" : not na(fvg_bear_high) ? "BEAR" : "—"
+    fvg_col = not na(fvg_bull_high) ? color.green : not na(fvg_bear_high) ? color.red : color.gray
+    table.cell(d, 0, 3, "FVG", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, fvg_txt, text_color=fvg_col, text_size=size.small)
+
+    // S/R
+    sr_txt = near_support ? "SUPPORT" : near_resist ? "RESIST" : "—"
+    sr_col = near_support ? color.green : near_resist ? color.red : color.gray
+    table.cell(d, 0, 4, "S/R", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, sr_txt, text_color=sr_col, text_size=size.small)
+
+    // Sweep
+    sw_txt = sweep_lows ? "LOWS" : sweep_highs ? "HIGHS" : "—"
+    sw_col = sweep_lows ? color.green : sweep_highs ? color.red : color.gray
+    table.cell(d, 0, 5, "Sweep", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, sw_txt, text_color=sw_col, text_size=size.small)
+
+    // Volume
+    v_col = volume > vol_ma ? color.green : color.gray
+    table.cell(d, 0, 6, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, str.tostring(volume / vol_ma, "#.#") + "x MA", text_color=v_col, text_size=size.small)
+
+    // Trades
+    table.cell(d, 0, 7, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, str.tostring(day_trades) + "/" + str.tostring(max_daily), text_color=day_trades >= max_daily ? color.red : color.white, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(final_long, title="PE LONG", message="LONG {{close}}")
+alertcondition(final_short, title="PE SHORT", message="SHORT {{close}}")
