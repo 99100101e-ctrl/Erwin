@@ -1,0 +1,353 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V14 — V13 + Risk Management + ADX Filter                   ║
+// ║  © Erwin 2026                                                             ║
+// ║                                                                           ║
+// ║  Logique V13 identique (SuperTrend + EMA pullback)                       ║
+// ║  + Filtre ADX (pas de trade en marché choppy)                            ║
+// ║  + Score de confiance affiché dans le dashboard                          ║
+// ║  + Position sizing dynamique (2% risque/trade)                           ║
+// ║  + Circuit breaker (3 pertes consécutives = pause)                       ║
+// ║                                                                           ║
+// ║  ⚠️  Version de TEST — correspond au bot V14 (telegram-bot-v2)           ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V14 — Risk Managed", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "SuperTrend"
+st_factor = input.float(3.0, "Factor",     step=0.5, group=grp1)
+st_period = input.int(10,    "ATR Period",  minval=5, group=grp1)
+
+grp2 = "EMAs"
+ema_fast_len  = input.int(21,  "EMA rapide", minval=5,  group=grp2)
+ema_slow_len  = input.int(50,  "EMA lente",  minval=20, group=grp2)
+ema_macro_len = input.int(200, "EMA macro",  minval=100, group=grp2)
+
+grp3 = "Pullback"
+ema_pb_len  = input.int(21,    "EMA pullback", minval=5, group=grp3)
+pb_zone_pct = input.float(0.5, "Zone (%)",     step=0.1, group=grp3)
+
+grp4 = "LONG Risk (V11 — prouvé)"
+atr_len        = input.int(14,    "ATR Period",          group=grp4)
+long_sl_mult   = input.float(2.0, "Long SL (x ATR)",    step=0.25, group=grp4)
+long_use_trail = input.bool(true,  "Long Trailing",      group=grp4)
+long_trail_m   = input.float(2.0, "Long Trail (x ATR)",  step=0.25, group=grp4)
+long_tp_rr     = input.float(3.0, "Long TP si pas trail", step=0.25, group=grp4)
+
+grp5 = "SHORT Risk (asymétrique)"
+short_sl_mult  = input.float(3.0, "Short SL (x ATR)",   step=0.25, group=grp5,
+     tooltip="Plus large — BTC bounces violents en baisse")
+short_exit     = input.string("ST Flip", "Short Exit",
+     options=["ST Flip", "Trail Large", "Fixed TP"], group=grp5)
+short_trail_m  = input.float(3.5, "Short Trail (x ATR)", step=0.25, group=grp5)
+short_tp_rr    = input.float(2.0, "Short TP (x risque)", step=0.25, group=grp5)
+short_require_ema200 = input.bool(true, "Short: prix sous EMA200 obligatoire", group=grp5,
+     tooltip="Ne shorter que quand le prix est sous EMA200 = vrai bear market")
+
+grp6 = "Direction"
+allow_long  = input.bool(true, "Autoriser LONG",  group=grp6)
+allow_short = input.bool(true, "Autoriser SHORT", group=grp6)
+
+grp7 = "Session"
+use_sess   = input.bool(false, "Session Filter", group=grp7)
+sess_open  = input.int(7,  "Open (UTC)",       group=grp7)
+sess_close = input.int(21, "Close (UTC)",      group=grp7)
+max_daily  = input.int(3,  "Max Trades/Jour",  group=grp7)
+
+// ── V14 — Nouveaux paramètres ──
+grp8 = "V14 — ADX Filter"
+use_adx      = input.bool(true,  "Activer filtre ADX",  group=grp8)
+adx_period   = input.int(14,     "ADX Period",           minval=5,  group=grp8)
+adx_min      = input.float(20.0, "ADX minimum",          step=1.0,  group=grp8,
+     tooltip="ADX < 20 = marché choppy/range → pas de trade")
+
+grp9 = "V14 — Confiance & Risk"
+min_confidence    = input.int(3,     "Confiance minimum (1-5)", minval=1, maxval=5, group=grp9)
+risk_per_trade    = input.float(2.0, "Risque par trade (%)",    step=0.5, group=grp9)
+use_circuit_break = input.bool(true, "Circuit Breaker",         group=grp9)
+max_consec_losses = input.int(3,     "Max pertes consécutives", minval=1, group=grp9)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATEURS
+// ══════════════════════════════════════════════════════════════════════════════
+
+[st_value, st_dir] = ta.supertrend(st_factor, st_period)
+st_bull = st_dir < 0
+st_bear = st_dir > 0
+
+ema_f   = ta.ema(close, ema_fast_len)
+ema_s   = ta.ema(close, ema_slow_len)
+ema200  = ta.ema(close, ema_macro_len)
+ema_pb  = ta.ema(close, ema_pb_len)
+atr_val = ta.atr(atr_len)
+
+// Trend
+trend_up   = st_bull and ema_f > ema_s
+trend_down = st_bear and ema_f < ema_s
+
+// Pullback zones
+pb_zone = ema_pb * pb_zone_pct / 100
+pb_long  = low <= ema_pb + pb_zone and close > ema_pb and close > open
+pb_short = high >= ema_pb - pb_zone and close < ema_pb and close < open
+
+// Session + daily limit
+hr = hour(time, "UTC")
+in_session = not use_sess or (hr >= sess_open and hr < sess_close)
+
+var int day_trades = 0
+if ta.change(dayofmonth(time)) != 0
+    day_trades := 0
+can_trade = day_trades < max_daily
+no_pos = strategy.position_size == 0
+
+// Filtre macro short
+short_macro = not short_require_ema200 or close < ema200
+
+// ══════════════════════════════════════════════════════════════════════════════
+// V14 — ADX (Average Directional Index)
+// ══════════════════════════════════════════════════════════════════════════════
+
+dirmov(len) =>
+    up   = ta.change(high)
+    down = -ta.change(low)
+    plusDM  = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    truerange = ta.rma(ta.tr, len)
+    plus_di   = 100 * ta.rma(plusDM, len) / truerange
+    minus_di  = 100 * ta.rma(minusDM, len) / truerange
+    [plus_di, minus_di]
+
+adx(dilen, adxlen) =>
+    [plus_di, minus_di] = dirmov(dilen)
+    sum = plus_di + minus_di
+    adx_val = 100 * ta.rma(math.abs(plus_di - minus_di) / (sum == 0 ? 1 : sum), adxlen)
+    adx_val
+
+adx_val = adx(adx_period, adx_period)
+adx_ok  = not use_adx or adx_val >= adx_min
+
+// ══════════════════════════════════════════════════════════════════════════════
+// V14 — SCORE DE CONFIANCE (0-5)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Volume spike
+vol_ma   = ta.sma(volume, 20)
+vol_spike = volume > vol_ma * 1.3
+
+// Long confidence
+long_conf = 0
+long_conf := long_conf + (st_bull ? 1 : 0)
+long_conf := long_conf + (ema_f > ema_s ? 1 : 0)
+long_conf := long_conf + (pb_long ? 1 : 0)
+long_conf := long_conf + (adx_ok ? 1 : 0)
+long_conf := long_conf + (vol_spike ? 1 : 0)
+
+// Short confidence
+short_conf = 0
+short_conf := short_conf + (st_bear ? 1 : 0)
+short_conf := short_conf + (ema_f < ema_s ? 1 : 0)
+short_conf := short_conf + (pb_short ? 1 : 0)
+short_conf := short_conf + (adx_ok ? 1 : 0)
+short_conf := short_conf + (short_macro ? 1 : 0)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// V14 — CIRCUIT BREAKER
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int consec_losses = 0
+var bool cb_paused    = false
+
+// Track wins/losses à la fermeture
+if strategy.closedtrades > 0
+    last_pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if ta.change(strategy.closedtrades) > 0
+        if last_pnl <= 0
+            consec_losses += 1
+        else
+            consec_losses := 0
+        if use_circuit_break and consec_losses >= max_consec_losses
+            cb_paused := true
+
+// Reset au nouveau jour
+if ta.change(dayofmonth(time)) != 0
+    cb_paused    := false
+    consec_losses := 0
+
+circuit_ok = not use_circuit_break or not cb_paused
+
+// ══════════════════════════════════════════════════════════════════════════════
+// V14 — POSITION SIZING (2% risque par trade)
+// ══════════════════════════════════════════════════════════════════════════════
+
+calc_qty(entry_price, sl_price) =>
+    sl_dist = math.abs(entry_price - sl_price)
+    sl_pct  = sl_dist / entry_price
+    risk_amount = strategy.equity * risk_per_trade / 100
+    pos_value   = sl_pct > 0 ? risk_amount / sl_pct : 0
+    // Cap à 50% de l'equity
+    pos_value := math.min(pos_value, strategy.equity * 0.5)
+    qty = pos_value / entry_price
+    qty
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX (V13 + filtres V14)
+// ══════════════════════════════════════════════════════════════════════════════
+
+long_signal  = allow_long  and trend_up   and pb_long  and in_session and can_trade and no_pos and adx_ok and long_conf >= min_confidence and circuit_ok
+short_signal = allow_short and trend_down and pb_short and short_macro and in_session and can_trade and no_pos and adx_ok and short_conf >= min_confidence and circuit_ok
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GESTION DES ORDRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float trail_long_val  = na
+var float trail_short_val = na
+
+// Protection : fermer sur flip SuperTrend
+if st_bear and strategy.position_size > 0
+    strategy.close("L", comment="ST Flip ▼")
+    trail_long_val := na
+
+if st_bull and strategy.position_size < 0
+    strategy.close("S", comment="ST Flip ▲")
+    trail_short_val := na
+
+// ── LONG ──
+if long_signal
+    float sl   = close - atr_val * long_sl_mult
+    float risk = close - sl
+    if risk > 0
+        float qty = calc_qty(close, sl)
+        day_trades += 1
+        trail_long_val  := sl
+        trail_short_val := na
+        strategy.entry("L", strategy.long, qty=qty)
+        if not long_use_trail
+            strategy.exit("L_exit", "L", stop=sl, limit=close + risk * long_tp_rr)
+
+if long_use_trail and strategy.position_size > 0 and not na(trail_long_val)
+    trail_long_val := math.max(trail_long_val, close - atr_val * long_trail_m)
+    if close <= trail_long_val
+        strategy.close("L", comment="Trail L")
+        trail_long_val := na
+
+// ── SHORT ──
+if short_signal
+    float sl   = close + atr_val * short_sl_mult
+    float risk = sl - close
+    if risk > 0
+        float qty = calc_qty(close, sl)
+        day_trades += 1
+        trail_short_val := sl
+        trail_long_val  := na
+        strategy.entry("S", strategy.short, qty=qty)
+
+        if short_exit == "Fixed TP"
+            strategy.exit("S_exit", "S", stop=sl, limit=close - risk * short_tp_rr)
+        else if short_exit == "ST Flip"
+            strategy.exit("S_sl", "S", stop=sl)
+
+if short_exit == "Trail Large" and strategy.position_size < 0 and not na(trail_short_val)
+    trail_short_val := math.min(trail_short_val, close + atr_val * short_trail_m)
+    if close >= trail_short_val
+        strategy.close("S", comment="Trail S")
+        trail_short_val := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(st_value, "SuperTrend", st_bull ? color.green : color.red, linewidth=3, style=plot.style_stepline)
+plot(ema_f,   "EMA 21",  color.new(color.aqua, 30),   linewidth=1)
+plot(ema_s,   "EMA 50",  color.new(color.orange, 30),  linewidth=2)
+plot(ema200,  "EMA 200", color.new(color.white, 40),   linewidth=2)
+plot(ema_pb,  "EMA PB",  color.new(color.yellow, 60),  linewidth=1, style=plot.style_circles)
+
+plot(strategy.position_size > 0 and long_use_trail ? trail_long_val : na, "Trail L", color.new(color.lime, 30), linewidth=1, style=plot.style_stepline)
+plot(strategy.position_size < 0 and short_exit == "Trail Large" ? trail_short_val : na, "Trail S", color.new(color.fuchsia, 30), linewidth=1, style=plot.style_stepline)
+
+bgcolor(trend_up ? color.new(color.green, 94) : trend_down ? color.new(color.red, 94) : color.new(color.gray, 97))
+
+// Signal markers avec confiance
+plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=#00FF88, text="▲ L")
+plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=#FF4444, text="▼ S")
+
+// ADX choppy warning
+plotshape(use_adx and adx_val < adx_min and no_pos and (trend_up or trend_down), title="ADX Low", location=location.bottom, style=shape.xcross, size=size.tiny, color=color.new(color.yellow, 20), text="choppy")
+
+// Circuit breaker pause marker
+plotshape(cb_paused, title="CB Pause", location=location.top, style=shape.flag, size=size.small, color=color.red, text="PAUSE")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD V14
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=12, columns=2,
+         bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
+
+    table.cell(d, 0, 0, "PE V14", bgcolor=color.new(#9900FF, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "Risk Managed", bgcolor=color.new(#9900FF, 20), text_color=color.white, text_size=size.small)
+
+    table.cell(d, 0, 1, "SuperTrend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, st_bull ? "BULL ▲" : "BEAR ▼", text_color=st_bull ? color.green : color.red, text_size=size.small)
+
+    table.cell(d, 0, 2, "EMA 21/50", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, ema_f > ema_s ? "Bull ▲" : "Bear ▼", text_color=ema_f > ema_s ? color.green : color.red, text_size=size.small)
+
+    table.cell(d, 0, 3, "EMA 200", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, close > ema200 ? "Au-dessus" : "En-dessous", text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+
+    // ADX
+    adx_col = adx_val >= adx_min ? color.green : color.red
+    table.cell(d, 0, 4, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, str.tostring(adx_val, "#.0") + (adx_val >= adx_min ? " ✓" : " ✗ choppy"), text_color=adx_col, text_size=size.small)
+
+    // Trend
+    dir_txt = trend_up ? "▲ LONG" : trend_down ? "▼ SHORT" : "— NEUTRE"
+    dir_col = trend_up ? color.green : trend_down ? color.red : color.gray
+    table.cell(d, 0, 5, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, dir_txt, text_color=dir_col, text_size=size.small, bgcolor=color.new(dir_col, 85))
+
+    // Confiance
+    conf_val  = trend_up ? long_conf : trend_down ? short_conf : 0
+    conf_text = str.tostring(conf_val) + "/5"
+    conf_col  = conf_val >= 4 ? color.green : conf_val >= min_confidence ? color.orange : color.red
+    table.cell(d, 0, 6, "Confiance", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, conf_text + (conf_val >= min_confidence ? " ✓" : " ✗"), text_color=conf_col, text_size=size.small)
+
+    // Volume
+    table.cell(d, 0, 7, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, vol_spike ? "Spike ▲" : "Normal", text_color=vol_spike ? color.green : color.gray, text_size=size.small)
+
+    // Risk par trade
+    table.cell(d, 0, 8, "Risk/Trade", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 8, str.tostring(risk_per_trade, "#.0") + "%", text_color=color.aqua, text_size=size.small)
+
+    // Long / Short config
+    table.cell(d, 0, 9, "Long", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 9, long_use_trail ? "Trail " + str.tostring(long_trail_m) + "x" : "TP " + str.tostring(long_tp_rr) + "x", text_color=color.lime, text_size=size.small)
+
+    table.cell(d, 0, 10, "Short", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 10, short_exit + " | SL " + str.tostring(short_sl_mult) + "x", text_color=color.fuchsia, text_size=size.small)
+
+    // Circuit Breaker
+    cb_txt = cb_paused ? "PAUSE (" + str.tostring(consec_losses) + " losses)" : str.tostring(consec_losses) + "/" + str.tostring(max_consec_losses) + " losses"
+    cb_col = cb_paused ? color.red : consec_losses > 0 ? color.orange : color.green
+    table.cell(d, 0, 11, "Circuit B.", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 11, cb_txt, text_color=cb_col, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal,  title="V14 LONG",  message="PE V14 LONG — Conf " + str.tostring(long_conf) + "/5 | ADX " + str.tostring(adx_val, "#.0") + " | {{close}}")
+alertcondition(short_signal, title="V14 SHORT", message="PE V14 SHORT — Conf " + str.tostring(short_conf) + "/5 | ADX " + str.tostring(adx_val, "#.0") + " | {{close}}")
+alertcondition(cb_paused,    title="V14 PAUSE", message="PE V14 CIRCUIT BREAKER — " + str.tostring(consec_losses) + " pertes consécutives")
