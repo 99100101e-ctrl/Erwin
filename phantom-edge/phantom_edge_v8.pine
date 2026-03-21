@@ -1,0 +1,289 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V8 — Trend Follower (SuperTrend + EMA)                      ║
+// ║  © Erwin 2026                                                              ║
+// ║                                                                            ║
+// ║  RETOUR AUX FONDAMENTAUX :                                                ║
+// ║  → SuperTrend 1H = direction (rapide, adaptatif à la volatilité)          ║
+// ║  → EMA 21/50 alignment = confirmation du trend                            ║
+// ║  → Pullback EMA 21 (15m) = entrée dans le sens du trend                  ║
+// ║  → LONG en tendance haussière, SHORT en tendance baissière               ║
+// ║  → Trailing stop = laisser courir les gains                               ║
+// ║                                                                            ║
+// ║  POURQUOI V1-V7 PERDENT :                                                ║
+// ║  V1-V4 : trop d'indicateurs = signaux contradictoires                     ║
+// ║  V5 : EMA 50/200 = crossover trop lent, trend fini quand ça trigger      ║
+// ║  V6 : mean reversion = shorte le rally = margin calls                     ║
+// ║  V7 : long only = rate les baisses                                        ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V8 — Trend Follower", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "SuperTrend (1H — Direction)"
+st_factor  = input.float(3.0, "SuperTrend Factor", step=0.5, group=grp1)
+st_period  = input.int(10,    "SuperTrend ATR Period", minval=5, group=grp1)
+
+grp2 = "EMAs (1H — Confirmation)"
+ema_fast_1h = input.int(21, "EMA rapide 1H", minval=5,  group=grp2)
+ema_slow_1h = input.int(50, "EMA lente 1H",  minval=20, group=grp2)
+
+grp3 = "Entrée Pullback (15m)"
+ema_pb_len  = input.int(21,   "EMA Pullback 15m", minval=5, group=grp3)
+pb_zone_pct = input.float(0.5, "Zone pullback (% autour EMA)", step=0.1, group=grp3)
+rsi_len     = input.int(14,   "RSI Period", group=grp3)
+
+grp4 = "Risk Management"
+atr_len     = input.int(14,   "ATR Period",              group=grp4)
+sl_atr_mult = input.float(2.0, "SL (x ATR)",             step=0.25, group=grp4)
+tp_rr       = input.float(2.5, "TP (x risque)",          step=0.25, group=grp4)
+use_trail   = input.bool(true, "Trailing Stop",           group=grp4)
+trail_atr   = input.float(2.0, "Trail distance (x ATR)",  step=0.25, group=grp4)
+
+grp5 = "Filtres"
+max_daily   = input.int(2,    "Max Trades/Jour", minval=1, group=grp5)
+use_sess    = input.bool(true, "Session Filter",  group=grp5)
+sess_open   = input.int(7,    "Open (UTC)",       group=grp5)
+sess_close  = input.int(21,   "Close (UTC)",      group=grp5)
+min_atr_pct = input.float(0.3, "ATR min (% du prix)", step=0.05, group=grp5, tooltip="Évite de trader quand la volatilité est trop faible")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUPERTREND 1H (Direction principale)
+// Le SuperTrend est supérieur aux EMA cross car :
+// - Il s'adapte à la VOLATILITÉ (basé sur ATR)
+// - Il flip plus vite qu'un EMA crossover
+// - Il donne un signal clair : au-dessus = bull, en-dessous = bear
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Calcul SuperTrend sur 1H
+[st_value_1h, st_dir_1h] = request.security(syminfo.tickerid, "60", ta.supertrend(st_factor, st_period), lookahead=barmerge.lookahead_off)
+
+// SuperTrend direction : -1 = bullish (prix au-dessus), 1 = bearish (prix en-dessous)
+st_bull = st_dir_1h < 0   // SuperTrend bullish
+st_bear = st_dir_1h > 0   // SuperTrend bearish
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EMAs 1H (Confirmation du trend)
+// On utilise EMA 21/50 au lieu de 50/200 → beaucoup plus réactif
+// ══════════════════════════════════════════════════════════════════════════════
+
+ema_f_1h = request.security(syminfo.tickerid, "60", ta.ema(close, ema_fast_1h), lookahead=barmerge.lookahead_off)
+ema_s_1h = request.security(syminfo.tickerid, "60", ta.ema(close, ema_slow_1h), lookahead=barmerge.lookahead_off)
+close_1h = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+
+// EMAs alignées
+ema_bull_1h = ema_f_1h > ema_s_1h  // EMA 21 au-dessus de EMA 50
+ema_bear_1h = ema_f_1h < ema_s_1h  // EMA 21 en-dessous de EMA 50
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TREND DIRECTION FINALE (1H)
+// SuperTrend + EMA doivent TOUS les deux confirmer
+// ══════════════════════════════════════════════════════════════════════════════
+
+trend_bull = st_bull and ema_bull_1h   // Les deux disent UP → LONG
+trend_bear = st_bear and ema_bear_1h   // Les deux disent DOWN → SHORT
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PULLBACK 15m (Point d'entrée)
+// On attend que le prix revienne vers EMA 21 DANS le sens du trend
+// ══════════════════════════════════════════════════════════════════════════════
+
+ema_pb   = ta.ema(close, ema_pb_len)
+atr_val  = ta.atr(atr_len)
+rsi_val  = ta.rsi(close, rsi_len)
+
+// Zone de pullback = prix proche de l'EMA 21 (±zone%)
+pb_zone    = ema_pb * pb_zone_pct / 100
+near_ema   = math.abs(close - ema_pb) <= pb_zone or math.abs(low - ema_pb) <= pb_zone or math.abs(high - ema_pb) <= pb_zone
+
+// LONG pullback : prix touche/croise EMA21 par le bas et rebondit
+pb_long = low <= ema_pb + pb_zone and close > ema_pb  // touche la zone puis ferme AU DESSUS
+// SHORT pullback : prix touche/croise EMA21 par le haut et rejette
+pb_short = high >= ema_pb - pb_zone and close < ema_pb  // touche la zone puis ferme EN DESSOUS
+
+// Bougie de confirmation
+bull_candle = close > open and (close - open) > (high - low) * 0.35  // corps haussier significatif
+bear_candle = close < open and (open - close) > (high - low) * 0.35  // corps baissier significatif
+
+// RSI : pas en extrême opposé au trade
+rsi_ok_long  = rsi_val < 70 and rsi_val > 30   // pas surachat pour un long
+rsi_ok_short = rsi_val > 30 and rsi_val < 70   // pas survente pour un short
+
+// Volatilité suffisante
+atr_pct = atr_val / close * 100
+vol_ok  = atr_pct >= min_atr_pct
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION + DAILY LIMIT
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+in_session = not use_sess or (hr >= sess_open and hr < sess_close)
+
+var int day_trades = 0
+if ta.change(dayofmonth(time)) != 0
+    day_trades := 0
+can_trade = day_trades < max_daily
+
+no_pos = strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX FINAUX
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG  = Trend 1H bull (SuperTrend + EMA) + Pullback EMA21 + bougie haussière
+// SHORT = Trend 1H bear (SuperTrend + EMA) + Pullback EMA21 + bougie baissière
+final_long  = trend_bull and pb_long  and bull_candle and rsi_ok_long  and vol_ok and in_session and can_trade and no_pos
+final_short = trend_bear and pb_short and bear_candle and rsi_ok_short and vol_ok and in_session and can_trade and no_pos
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GESTION DES ORDRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Variables trailing stop ---
+var float trail_long  = na
+var float trail_short = na
+
+if final_long
+    float sl   = close - atr_val * sl_atr_mult
+    float risk = close - sl
+    if risk > 0
+        day_trades += 1
+        trail_long := sl
+        trail_short := na
+        strategy.entry("L", strategy.long)
+        if not use_trail
+            strategy.exit("L_exit", "L", stop=sl, limit=close + risk * tp_rr)
+
+if final_short
+    float sl   = close + atr_val * sl_atr_mult
+    float risk = sl - close
+    if risk > 0
+        day_trades += 1
+        trail_short := sl
+        trail_long := na
+        strategy.entry("S", strategy.short)
+        if not use_trail
+            strategy.exit("S_exit", "S", stop=sl, limit=close - risk * tp_rr)
+
+// --- Trailing Stop ---
+if use_trail and strategy.position_size > 0
+    float new_trail = close - atr_val * trail_atr
+    if not na(trail_long)
+        trail_long := math.max(trail_long, new_trail)
+        if close <= trail_long
+            strategy.close("L", comment="Trail SL")
+            trail_long := na
+
+if use_trail and strategy.position_size < 0
+    float new_trail = close + atr_val * trail_atr
+    if not na(trail_short)
+        trail_short := math.min(trail_short, new_trail)
+        if close >= trail_short
+            strategy.close("S", comment="Trail SL")
+            trail_short := na
+
+// --- Sortie si le trend se retourne ---
+if strategy.position_size > 0 and trend_bear
+    strategy.close("L", comment="Trend Flip ▼")
+    trail_long := na
+
+if strategy.position_size < 0 and trend_bull
+    strategy.close("S", comment="Trend Flip ▲")
+    trail_short := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// SuperTrend 1H
+plot(st_value_1h, "SuperTrend 1H", st_bull ? color.new(color.green, 20) : color.new(color.red, 20), linewidth=3, style=plot.style_stepline)
+
+// EMAs 1H
+plot(ema_f_1h, "EMA 21 (1H)", color.new(color.aqua, 30), linewidth=2)
+plot(ema_s_1h, "EMA 50 (1H)", color.new(color.orange, 30), linewidth=2)
+
+// EMA 21 15m (pullback)
+plot(ema_pb, "EMA 21 (15m)", color.new(color.white, 50), linewidth=1)
+
+// Trailing stops actifs
+plot(strategy.position_size > 0 and use_trail ? trail_long  : na, "Trail Long",  color.new(color.lime, 30), linewidth=1, style=plot.style_stepline)
+plot(strategy.position_size < 0 and use_trail ? trail_short : na, "Trail Short", color.new(color.fuchsia, 30), linewidth=1, style=plot.style_stepline)
+
+// Background : couleur du trend
+bgcolor(trend_bull ? color.new(color.green, 94) : trend_bear ? color.new(color.red, 94) : color.new(color.gray, 97), title="Trend Background")
+
+// Signaux
+plotshape(final_long,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=color.new(#00FF88, 0), text="▲ LONG")
+plotshape(final_short, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=color.new(#FF4444, 0), text="▼ SHORT")
+
+// Pullback zones (subtiles)
+plotshape(pb_long and trend_bull and not final_long,   title="PB Zone Long",  location=location.belowbar, style=shape.circle, size=size.tiny, color=color.new(color.green, 70))
+plotshape(pb_short and trend_bear and not final_short, title="PB Zone Short", location=location.abovebar, style=shape.circle, size=size.tiny, color=color.new(color.red, 70))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=9, columns=2,
+         bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
+
+    table.cell(d, 0, 0, "PE V8", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "Trend Follower", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+
+    // SuperTrend
+    st_txt = st_bull ? "BULL ▲" : "BEAR ▼"
+    st_col = st_bull ? color.green : color.red
+    table.cell(d, 0, 1, "SuperTrend 1H", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, st_txt, text_color=st_col, text_size=size.small)
+
+    // EMA 1H
+    ema_txt = ema_bull_1h ? "21 > 50 ▲" : "21 < 50 ▼"
+    ema_col = ema_bull_1h ? color.green : color.red
+    table.cell(d, 0, 2, "EMA 1H", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, ema_txt, text_color=ema_col, text_size=size.small)
+
+    // Trend combiné
+    td_txt = trend_bull ? "▲ LONG ONLY" : trend_bear ? "▼ SHORT ONLY" : "— NO TRADE"
+    td_col = trend_bull ? color.green : trend_bear ? color.red : color.gray
+    table.cell(d, 0, 3, "DIRECTION", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, td_txt, text_color=td_col, text_size=size.small, bgcolor=color.new(td_col, 85))
+
+    // Pullback
+    pb_txt = pb_long ? "LONG ZONE ✓" : pb_short ? "SHORT ZONE ✓" : "En attente"
+    pb_col = pb_long ? color.green : pb_short ? color.red : color.gray
+    table.cell(d, 0, 4, "Pullback EMA21", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, pb_txt, text_color=pb_col, text_size=size.small)
+
+    // RSI
+    table.cell(d, 0, 5, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, str.tostring(rsi_val, "#.0"), text_color=color.white, text_size=size.small)
+
+    // ATR %
+    atr_col = vol_ok ? color.white : color.orange
+    table.cell(d, 0, 6, "ATR %", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, str.tostring(atr_pct, "#.2") + "%" + (vol_ok ? "" : " LOW"), text_color=atr_col, text_size=size.small)
+
+    // Position
+    pos_txt = strategy.position_size > 0 ? "LONG ▲" : strategy.position_size < 0 ? "SHORT ▼" : "FLAT"
+    pos_col = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(d, 0, 7, "Position", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, pos_txt, text_color=pos_col, text_size=size.small)
+
+    // Trades/jour
+    table.cell(d, 0, 8, "Trades/Jour", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 8, str.tostring(day_trades) + "/" + str.tostring(max_daily), text_color=day_trades >= max_daily ? color.red : color.white, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(final_long,  title="PE V8 LONG",  message="PE V8 LONG — SuperTrend Bull + EMA Bull + Pullback {{close}}")
+alertcondition(final_short, title="PE V8 SHORT", message="PE V8 SHORT — SuperTrend Bear + EMA Bear + Pullback {{close}}")
