@@ -141,8 +141,8 @@ if exit_signal
 
 // EMAs
 col_fast = ema_fast < ema_slow ? color.red : color.green
-plot(ema_fast, "EMA " + str.tostring(ema_fast_len), col_fast, linewidth=2)
-plot(ema_slow, "EMA " + str.tostring(ema_slow_len), color.new(color.aqua, 20), linewidth=2)
+plot(ema_fast, "EMA Fast", col_fast, linewidth=2)
+plot(ema_slow, "EMA Slow", color.new(color.aqua, 20), linewidth=2)
 plot(use_ema200 ? ema_200 : na, "EMA 200", color.new(color.white, 40), linewidth=1)
 
 // Zone short active (EMA rapide sous lente)
