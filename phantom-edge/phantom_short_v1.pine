@@ -1,22 +1,23 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM SHORT V10 — Slope Filter                                         ║
+// ║  PHANTOM SHORT V11 — Breakeven Stop + Smart Sizing                        ║
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
-// ║  DIAGNOSTIC V7/V8 :                                                        ║
-// ║  - Les trades capturaient de vrais pullbacks (excursion favorable OK)      ║
-// ║  - V7 : sortie "close > EMA rapide" trop rapide → rendait le profit      ║
-// ║  - V8 : trailing stop 5% trop serré pour BTC daily → sortait trop tôt   ║
+// ║  CONSTAT après V7-V10 :                                                   ║
+// ║  - Filtres macro (EMA 200, pente) = trop restrictifs ou inefficaces       ║
+// ║  - V9 sans filtres : +$244, PF 1.077 (meilleur résultat)                ║
+// ║  - Sortie "EMA re-cross haussier" = meilleur mode                        ║
+// ║  - Problème : les PERDANTS (bull pullbacks) perdent trop                 ║
 // ║                                                                            ║
-// ║  V10 : FILTRE PENTE EMA 50                                                ║
-// ║  - Ne shorter que quand EMA 50 est en BAISSE (vrai retournement)         ║
-// ║  - Si EMA 50 monte encore = simple pullback dans bull market → skip      ║
-// ║  - Plus rapide que EMA 200 (qui laggait trop et bloquait les tops)       ║
-// ║  - Sortie = EMA re-cross haussier (meilleur résultat testé)              ║
-// ║  - Trailing stop élargi (10%/12%) en filet de sécurité                   ║
+// ║  V11 : COUPER LES PERDANTS, LAISSER COURIR LES GAGNANTS                 ║
+// ║  1. BREAKEVEN STOP : si trade atteint +5%, stop passe à entry price      ║
+// ║     → bull pullback : petit gain puis reverse → sort à breakeven          ║
+// ║     → bear market : gain continue → profit court                          ║
+// ║  2. TIME STOP : si pas en profit après 15 barres → sort (trade mort)     ║
+// ║  3. Pas de filtre macro = prend tous les signaux                          ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
-strategy("Phantom Short V10 — Slope Filter", overlay=true,
+strategy("Phantom Short V11 — Smart Stops", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=30,
      commission_type=strategy.commission.percent, commission_value=0.075,
      slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
@@ -25,45 +26,37 @@ strategy("Phantom Short V10 — Slope Filter", overlay=true,
 // PARAMÈTRES
 // ══════════════════════════════════════════════════════════════════════════════
 
-grp0 = "Filtre Tendance Majeure"
-use_macro      = input.bool(false, "Filtre EMA 200 actif (close < EMA 200)", group=grp0)
-ema_macro_len  = input.int(200, "EMA macro", group=grp0, minval=50)
-use_slope      = input.bool(true, "Filtre pente EMA lente (doit baisser)", group=grp0,
-     tooltip="Ne shorter que quand l'EMA lente est en BAISSE. Si elle monte encore = bull market pullback → pas de short.")
-slope_bars     = input.int(5, "Lookback pente (barres)", group=grp0, minval=1, maxval=20,
-     tooltip="Compare l'EMA lente actuelle vs il y a N barres. Si elle a baissé → tendance baissière confirmée.")
-
 grp1 = "Signal EMAs"
 ema_fast_len  = input.int(21,   "EMA rapide (signal)",  group=grp1)
 ema_slow_len  = input.int(50,   "EMA lente (signal)",   group=grp1)
 
 grp2 = "Filtre ADX — éviter les ranges"
-use_adx       = input.bool(true,  "Filtre ADX actif", group=grp2,
-     tooltip="ADX mesure la FORCE du trend. Évite de shorter dans les zones choppy/range.")
+use_adx       = input.bool(true,  "Filtre ADX actif", group=grp2)
 adx_len       = input.int(14,    "ADX Period",   group=grp2)
-adx_min       = input.float(20,  "ADX minimum",  step=1.0, group=grp2,
-     tooltip="ADX > 20 = trend en cours. ADX < 20 = range/chop → pas de trade")
+adx_min       = input.float(20,  "ADX minimum",  step=1.0, group=grp2)
 
 grp3 = "Sortie"
 exit_mode     = input.string("EMA re-cross haussier", "Mode de sortie",
-     options=["EMA re-cross haussier", "Close au-dessus EMA rapide", "Close au-dessus EMA lente"], group=grp3,
-     tooltip="EMA re-cross = attend le vrai retournement de tendance. Meilleur résultat car on reste dans le trade pendant toute la phase baissière.")
+     options=["EMA re-cross haussier", "Close au-dessus EMA rapide", "Close au-dessus EMA lente"], group=grp3)
 exit_bars     = input.int(2, "Barres consécutives au-dessus pour sortir", group=grp3, minval=1)
 
-grp4 = "Trailing Stop — verrouille les gains"
-use_trail     = input.bool(true, "Trailing Stop actif", group=grp4,
-     tooltip="Quand le trade est en profit, suit le prix le plus bas. Si le prix remonte de X%, on sort avec le profit verrouillé.")
-trail_activate = input.float(10.0, "Activation (% de profit min)", step=1.0, group=grp4,
-     tooltip="Le trailing ne s'active qu'après 10% de profit. Laisse le trade respirer.")
-trail_pct     = input.float(12.0, "Trail (% de rebond depuis le plus bas)", step=1.0, group=grp4,
-     tooltip="BTC daily peut bouncer de 8-10% dans un bear trend. 12% = rebond anormal → on sort.")
+grp4 = "Protection — couper les perdants"
+use_be        = input.bool(true, "Breakeven Stop", group=grp4,
+     tooltip="Quand le trade atteint le seuil de profit, le stop passe au prix d'entrée. Les mauvais trades sortent à 0 au lieu de perdre gros.")
+be_activate   = input.float(5.0, "Breakeven activation (% profit)", step=0.5, group=grp4,
+     tooltip="Une fois ce profit atteint, le stop passe à l'entrée.")
+use_time_stop = input.bool(true, "Time Stop (sort si pas en profit)", group=grp4,
+     tooltip="Si le trade n'est pas en profit après N barres, on sort. Un bon short descend vite.")
+time_stop_bars = input.int(15, "Barres max sans profit", group=grp4, minval=3,
+     tooltip="15 barres daily = 3 semaines. Si le short n'a pas bougé en 3 semaines, c'est mort.")
 
-grp4b = "Stop Loss fixe"
-use_sl        = input.bool(false, "Stop Loss fixe (sécurité absolue)", group=grp4b)
-sl_pct        = input.float(25.0, "SL (% au-dessus de l'entrée)", step=0.5, group=grp4b)
+grp5 = "Trailing Stop — verrouille les gros gains"
+use_trail     = input.bool(true, "Trailing Stop actif", group=grp5)
+trail_activate = input.float(10.0, "Activation (% de profit min)", step=1.0, group=grp5)
+trail_pct     = input.float(12.0, "Trail (% de rebond depuis le plus bas)", step=1.0, group=grp5)
 
-grp5 = "Anti-overtrading"
-min_bars_between = input.int(10, "Min barres entre trades", group=grp5)
+grp6 = "Anti-overtrading"
+min_bars_between = input.int(10, "Min barres entre trades", group=grp6)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // INDICATEURS
@@ -71,7 +64,6 @@ min_bars_between = input.int(10, "Min barres entre trades", group=grp5)
 
 ema_fast  = ta.ema(close, ema_fast_len)
 ema_slow  = ta.ema(close, ema_slow_len)
-ema_macro = ta.ema(close, ema_macro_len)
 
 // ADX
 [di_plus, di_minus, adx_val] = ta.dmi(adx_len, adx_len)
@@ -84,20 +76,12 @@ bullish_cross = ta.crossover(ema_fast, ema_slow)
 // SIGNAL D'ENTRÉE
 // ══════════════════════════════════════════════════════════════════════════════
 
-// EMA cross baissier
 entry_signal = bearish_cross
-
-// FILTRE MACRO : close doit être SOUS l'EMA 200 (bear market confirmé)
-cond_macro = not use_macro or close < ema_macro
-
-// FILTRE PENTE : l'EMA lente doit être en baisse (pas juste un pullback dans un bull trend)
-ema_slow_slope = ema_slow - ema_slow[slope_bars]
-cond_slope = not use_slope or ema_slow_slope < 0
 
 // ADX : trend assez fort
 cond_adx = not use_adx or adx_val >= adx_min
 
-// DI- doit être au-dessus de DI+ (confirmation baissière)
+// DI- > DI+ (confirmation baissière)
 cond_di = not use_adx or di_minus > di_plus
 
 // Cooldown
@@ -107,7 +91,7 @@ cooldown_ok = bars_since_trade >= min_bars_between
 no_pos = strategy.position_size == 0
 
 // Signal final
-short_signal = entry_signal and cond_macro and cond_slope and cond_adx and cond_di and cooldown_ok and no_pos
+short_signal = entry_signal and cond_adx and cond_di and cooldown_ok and no_pos
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SIGNAL DE SORTIE
@@ -136,19 +120,39 @@ exit_signal = strategy.position_size < 0 and bars_above_exit >= exit_bars
 var float entry_price = na
 var float lowest_price = na
 var bool trail_active = false
+var bool be_reached = false
+var int bars_in_trade = 0
 
 if short_signal
     bars_since_trade := 0
     entry_price := close
     lowest_price := close
     trail_active := false
+    be_reached := false
+    bars_in_trade := 0
     strategy.entry("S", strategy.short)
 
-    if use_sl
-        float sl_level = close * (1 + sl_pct / 100)
-        strategy.exit("S_sl", "S", stop=sl_level)
+// Compteur de barres en position
+if strategy.position_size < 0
+    bars_in_trade += 1
 
-// Trailing stop : suit le plus bas prix et sort si rebond trop fort
+// ── BREAKEVEN STOP ──
+if strategy.position_size < 0 and use_be and not na(entry_price)
+    float current_profit = (entry_price - close) / entry_price * 100
+    // Le trade a atteint le seuil → breakeven activé
+    if current_profit >= be_activate
+        be_reached := true
+    // Breakeven actif et prix revient au-dessus de l'entrée → SORT
+    if be_reached and close >= entry_price
+        strategy.close("S", comment="BE Stop")
+
+// ── TIME STOP ──
+if strategy.position_size < 0 and use_time_stop and not na(entry_price)
+    float current_profit2 = (entry_price - close) / entry_price * 100
+    if bars_in_trade >= time_stop_bars and current_profit2 <= 0
+        strategy.close("S", comment="Time Stop")
+
+// ── TRAILING STOP ──
 if strategy.position_size < 0 and use_trail and not na(entry_price)
     lowest_price := math.min(nz(lowest_price, close), close)
     float profit_pct = (entry_price - lowest_price) / entry_price * 100
@@ -159,10 +163,14 @@ if strategy.position_size < 0 and use_trail and not na(entry_price)
         if close >= trail_level
             strategy.close("S", comment="Trail Exit")
 
+// Reset quand flat
 if strategy.position_size == 0
     lowest_price := na
     trail_active := false
+    be_reached := false
+    bars_in_trade := 0
 
+// ── EMA EXIT ──
 if exit_signal
     strategy.close("S", comment="Trend Exit")
 
@@ -173,16 +181,12 @@ if exit_signal
 col_fast = ema_fast < ema_slow ? color.red : color.green
 plot(ema_fast, "EMA Fast", col_fast, linewidth=2)
 plot(ema_slow, "EMA Slow", color.new(color.aqua, 20), linewidth=2)
-plot(ema_macro, "EMA 200", color.new(color.white, 40), linewidth=1, style=plot.style_line)
 
 // Zone short active
-bear_zone = ema_fast < ema_slow
-slope_ok = not use_slope or ema_slow_slope < 0
-bgcolor(bear_zone and slope_ok ? color.new(color.red, 90) : na, title="Bear Zone (shortable)")
-bgcolor(bear_zone and not slope_ok ? color.new(color.yellow, 93) : na, title="Pullback zone (EMA lente monte → pas de short)")
+bgcolor(ema_fast < ema_slow ? color.new(color.red, 93) : na, title="Bearish Zone")
 
 // ADX trop faible
-bgcolor(bear_zone and slope_ok and use_adx and adx_val < adx_min ? color.new(color.orange, 93) : na, title="Low ADX (Choppy)")
+bgcolor(ema_fast < ema_slow and use_adx and adx_val < adx_min ? color.new(color.yellow, 90) : na, title="Low ADX (Choppy)")
 
 // Signaux
 plotshape(short_signal, title="SHORT", location=location.abovebar,
@@ -190,21 +194,18 @@ plotshape(short_signal, title="SHORT", location=location.abovebar,
 plotshape(exit_signal, title="EXIT", location=location.belowbar,
      style=shape.triangleup, size=size.normal, color=#44FF44, text="EXIT")
 
-// Cross filtré par pente (EMA lente monte = bull pullback)
-plotshape(bearish_cross and not short_signal and no_pos and not cond_slope, title="Blocked (Slope ↑)",
-     location=location.abovebar, style=shape.xcross, size=size.small, color=color.new(color.fuchsia, 30))
-
-// Cross filtré par ADX/DI ou macro
-plotshape(bearish_cross and not short_signal and no_pos and cond_slope, title="Blocked (ADX/DI/Macro)",
+// Cross filtré
+plotshape(bearish_cross and not short_signal and no_pos, title="Blocked",
      location=location.abovebar, style=shape.xcross, size=size.small, color=color.new(color.orange, 30))
 
-// PnL en cours
+// PnL en cours + breakeven status
 var label pnl_label = na
 if strategy.position_size < 0 and not na(entry_price)
     pnl_pct = (entry_price - close) / entry_price * 100
     label.delete(pnl_label)
+    be_txt = be_reached ? " [BE]" : ""
     pnl_col = pnl_pct > 0 ? color.green : color.red
-    pnl_label := label.new(bar_index, high, str.tostring(pnl_pct, "#.1") + "%",
+    pnl_label := label.new(bar_index, high, str.tostring(pnl_pct, "#.1") + "%" + be_txt,
          color=color.new(pnl_col, 60), textcolor=color.white, size=size.small, style=label.style_label_down)
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -212,58 +213,57 @@ if strategy.position_size < 0 and not na(entry_price)
 // ══════════════════════════════════════════════════════════════════════════════
 
 if barstate.islast
-    var table d = table.new(position=position.top_right, rows=9, columns=2,
+    var table d = table.new(position=position.top_right, rows=8, columns=2,
          bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
 
     table.cell(d, 0, 0, "PHANTOM", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 0, "SHORT V10", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "SHORT V11", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
 
-    // Slope EMA lente
-    slope_txt = ema_slow_slope < 0 ? "BAISSE ✓" : "HAUSSE ✗"
-    slope_col2 = ema_slow_slope < 0 ? color.red : color.lime
-    table.cell(d, 0, 1, "EMA " + str.tostring(ema_slow_len) + " pente", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 1, slope_txt, text_color=slope_col2, text_size=size.small)
-
-    // Trend signal
-    trend_txt = ema_fast < ema_slow ? "BEARISH" : "BULLISH"
-    table.cell(d, 0, 2, "Signal", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 2, trend_txt, text_color=ema_fast < ema_slow ? color.red : color.green, text_size=size.small)
+    // Trend
+    table.cell(d, 0, 1, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, ema_fast < ema_slow ? "BEARISH" : "BULLISH",
+         text_color=ema_fast < ema_slow ? color.red : color.green, text_size=size.small)
 
     // ADX
-    adx_col = adx_val >= adx_min ? color.green : color.orange
-    table.cell(d, 0, 3, "ADX", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 3, str.tostring(adx_val, "#.0") + (adx_val >= adx_min ? " TREND" : " CHOP"), text_color=adx_col, text_size=size.small)
+    table.cell(d, 0, 2, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, str.tostring(adx_val, "#.0") + (adx_val >= adx_min ? " TREND" : " CHOP"),
+         text_color=adx_val >= adx_min ? color.green : color.orange, text_size=size.small)
 
     // DI
-    table.cell(d, 0, 4, "DI-/DI+", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 4, str.tostring(di_minus, "#.0") + "/" + str.tostring(di_plus, "#.0"), text_color=di_minus > di_plus ? color.red : color.green, text_size=size.small)
+    table.cell(d, 0, 3, "DI-/DI+", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, str.tostring(di_minus, "#.0") + "/" + str.tostring(di_plus, "#.0"),
+         text_color=di_minus > di_plus ? color.red : color.green, text_size=size.small)
 
     // Position
     if strategy.position_size < 0 and not na(entry_price)
         pnl = (entry_price - close) / entry_price * 100
-        table.cell(d, 0, 5, "Position", text_color=color.white, text_size=size.small)
-        table.cell(d, 1, 5, "SHORT " + str.tostring(pnl, "#.1") + "%", text_color=pnl > 0 ? color.green : color.red, text_size=size.small)
+        pos_txt = "SHORT " + str.tostring(pnl, "#.1") + "%"
+        if be_reached
+            pos_txt := pos_txt + " [BE]"
+        table.cell(d, 0, 4, "Position", text_color=color.white, text_size=size.small)
+        table.cell(d, 1, 4, pos_txt, text_color=pnl > 0 ? color.green : color.red, text_size=size.small)
     else
-        table.cell(d, 0, 5, "Position", text_color=color.white, text_size=size.small)
-        table.cell(d, 1, 5, "FLAT", text_color=color.gray, text_size=size.small)
+        table.cell(d, 0, 4, "Position", text_color=color.white, text_size=size.small)
+        table.cell(d, 1, 4, "FLAT", text_color=color.gray, text_size=size.small)
 
-    // Taille
-    table.cell(d, 0, 6, "Taille", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, "30% equity", text_color=color.white, text_size=size.small)
+    // Bars in trade
+    table.cell(d, 0, 5, "En trade", text_color=color.white, text_size=size.small)
+    bars_txt = strategy.position_size < 0 ? str.tostring(bars_in_trade) + "/" + str.tostring(time_stop_bars) + " bars" : "-"
+    table.cell(d, 1, 5, bars_txt, text_color=bars_in_trade > time_stop_bars * 0.7 ? color.orange : color.gray, text_size=size.small)
 
-    // Trailing
-    trail_txt = use_trail ? (trail_active ? "ACTIF (low: " + str.tostring(lowest_price, "#") + ")" : "Attente (" + str.tostring(trail_activate, "#.0") + "%)") : "OFF"
-    trail_col = use_trail ? (trail_active ? color.green : color.yellow) : color.gray
-    table.cell(d, 0, 7, "Trail", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 7, trail_txt, text_color=trail_col, text_size=size.small)
+    // Trail
+    trail_txt = use_trail ? (trail_active ? "ACTIF (low: " + str.tostring(lowest_price, "#") + ")" : "Attente") : "OFF"
+    table.cell(d, 0, 6, "Trail", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, trail_txt, text_color=trail_active ? color.green : color.gray, text_size=size.small)
 
-    // Exit
-    table.cell(d, 0, 8, "Sortie", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 8, str.tostring(bars_above_exit) + "/" + str.tostring(exit_bars) + " bars", text_color=bars_above_exit > 0 ? color.orange : color.gray, text_size=size.small)
+    // Sortie
+    table.cell(d, 0, 7, "Sortie", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, str.tostring(bars_above_exit) + "/" + str.tostring(exit_bars) + " bars",
+         text_color=bars_above_exit > 0 ? color.orange : color.gray, text_size=size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ALERTES
 // ══════════════════════════════════════════════════════════════════════════════
 
-alertcondition(short_signal, title="V9 SHORT", message="PHANTOM SHORT V9 — Bear market short | {{close}}")
-alertcondition(exit_signal, title="V9 EXIT", message="PHANTOM SHORT V9 — Exit | {{close}}")
+alertcondition(short_signal, title="V11 SHORT", message="PHANTOM SHORT V11 — Short entry | {{close}}")
+alertcondition(exit_signal, title="V11 EXIT", message="PHANTOM SHORT V11 — Exit | {{close}}")
