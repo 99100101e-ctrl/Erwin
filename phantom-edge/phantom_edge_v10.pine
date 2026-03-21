@@ -1,0 +1,207 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V10 — KISS (Keep It Simple Stupid)                           ║
+// ║  © Erwin 2026                                                              ║
+// ║                                                                            ║
+// ║  CONSTAT : V5-V9 = trop de conditions = signaux tardifs ou jamais          ║
+// ║  SOLUTION : SuperTrend seul. C'est SON JOB de dire la direction.           ║
+// ║                                                                            ║
+// ║  → SuperTrend flip bullish = LONG                                          ║
+// ║  → SuperTrend flip bearish = SHORT                                         ║
+// ║  → EMA 200 = filtre macro (long seulement au-dessus, short en-dessous)    ║
+// ║  → Trailing stop ATR                                                       ║
+// ║  → PAS de HTF request.security (source de repainting/timing issues)       ║
+// ║  → PAS de pullback, ADX, RSI, volume (over-engineering)                    ║
+// ║                                                                            ║
+// ║  Si ça ne marche pas en backtest, rien ne marchera.                        ║
+// ║  C'est la BASELINE. On ajoutera de la complexité SEULEMENT si ça marche.  ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V10 — KISS", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES — Le minimum vital
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "SuperTrend"
+st_factor = input.float(3.0, "Factor",     step=0.5, group=grp1)
+st_period = input.int(10,    "ATR Period",  minval=5, group=grp1)
+
+grp2 = "Filtre Macro"
+use_ema200  = input.bool(true, "Filtre EMA 200", group=grp2,
+     tooltip="LONG seulement au-dessus EMA200, SHORT seulement en-dessous")
+ema200_len  = input.int(200, "EMA Slow", group=grp2)
+
+grp3 = "Risk"
+atr_len     = input.int(14,    "ATR Period",              group=grp3)
+sl_atr_mult = input.float(1.5, "SL initial (x ATR)",      step=0.25, group=grp3)
+use_trail   = input.bool(true, "Trailing Stop",            group=grp3)
+trail_mult  = input.float(2.0, "Trail distance (x ATR)",   step=0.25, group=grp3)
+use_tp      = input.bool(false, "Use fixed TP",            group=grp3)
+tp_rr       = input.float(3.0, "TP (x risque)",            step=0.25, group=grp3)
+
+grp4 = "Session"
+use_sess   = input.bool(false, "Session Filter", group=grp4,
+     tooltip="Désactivé par défaut — le SuperTrend gère déjà le timing")
+sess_open  = input.int(7,  "Open (UTC)",  group=grp4)
+sess_close = input.int(21, "Close (UTC)", group=grp4)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUPERTREND — Le seul indicateur qui compte
+// ══════════════════════════════════════════════════════════════════════════════
+
+[st_value, st_dir] = ta.supertrend(st_factor, st_period)
+
+// Direction : -1 = bull, +1 = bear
+st_bull = st_dir < 0
+st_bear = st_dir > 0
+
+// FLIP = changement de direction = signal d'entrée
+st_flip_bull = st_bull and not st_bull[1]   // vient de passer bull
+st_flip_bear = st_bear and not st_bear[1]   // vient de passer bear
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EMA 200 — Filtre macro simple
+// Au-dessus = environnement haussier, en-dessous = baissier
+// ══════════════════════════════════════════════════════════════════════════════
+
+ema200 = ta.ema(close, ema200_len)
+
+macro_bull = not use_ema200 or close > ema200   // OK pour long
+macro_bear = not use_ema200 or close < ema200   // OK pour short
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+in_session = not use_sess or (hr >= sess_open and hr < sess_close)
+
+atr_val = ta.atr(atr_len)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX — C'est tout. Pas 15 conditions.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG  = SuperTrend flip bull + au-dessus EMA200
+// SHORT = SuperTrend flip bear + en-dessous EMA200
+long_signal  = st_flip_bull and macro_bull and in_session
+short_signal = st_flip_bear and macro_bear and in_session
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GESTION DES ORDRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float trail_long  = na
+var float trail_short = na
+
+// --- Fermer la position opposée sur flip ---
+if st_flip_bull and strategy.position_size < 0
+    strategy.close("S", comment="ST Flip ▲")
+    trail_short := na
+
+if st_flip_bear and strategy.position_size > 0
+    strategy.close("L", comment="ST Flip ▼")
+    trail_long := na
+
+// --- Entrée LONG ---
+if long_signal
+    float sl   = close - atr_val * sl_atr_mult
+    float risk = close - sl
+    if risk > 0
+        trail_long := sl
+        trail_short := na
+        strategy.entry("L", strategy.long)
+        if use_tp and not use_trail
+            strategy.exit("L_tp", "L", stop=sl, limit=close + risk * tp_rr)
+        else if not use_trail
+            strategy.exit("L_sl", "L", stop=sl)
+
+// --- Entrée SHORT ---
+if short_signal
+    float sl   = close + atr_val * sl_atr_mult
+    float risk = sl - close
+    if risk > 0
+        trail_short := sl
+        trail_long  := na
+        strategy.entry("S", strategy.short)
+        if use_tp and not use_trail
+            strategy.exit("S_tp", "S", stop=sl, limit=close - risk * tp_rr)
+        else if not use_trail
+            strategy.exit("S_sl", "S", stop=sl)
+
+// --- Trailing Stop ---
+if use_trail and strategy.position_size > 0 and not na(trail_long)
+    trail_long := math.max(trail_long, close - atr_val * trail_mult)
+    if close <= trail_long
+        strategy.close("L", comment="Trail")
+        trail_long := na
+
+if use_trail and strategy.position_size < 0 and not na(trail_short)
+    trail_short := math.min(trail_short, close + atr_val * trail_mult)
+    if close >= trail_short
+        strategy.close("S", comment="Trail")
+        trail_short := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// SuperTrend
+st_color = st_bull ? color.new(color.green, 10) : color.new(color.red, 10)
+plot(st_value, "SuperTrend", st_color, linewidth=3, style=plot.style_stepline)
+
+// EMA 200
+plot(use_ema200 ? ema200 : na, "EMA 200", color.new(color.white, 40), linewidth=2)
+
+// Trailing
+plot(strategy.position_size > 0 and use_trail ? trail_long  : na, "Trail L", color.new(color.lime, 30), linewidth=1, style=plot.style_stepline)
+plot(strategy.position_size < 0 and use_trail ? trail_short : na, "Trail S", color.new(color.fuchsia, 30), linewidth=1, style=plot.style_stepline)
+
+// Background
+bgcolor(st_bull ? color.new(color.green, 95) : color.new(color.red, 95), title="ST Direction")
+
+// Signaux
+plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=#00FF88, text="▲ L")
+plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=#FF4444, text="▼ S")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD MINIMALISTE
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=5, columns=2,
+         bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
+
+    table.cell(d, 0, 0, "PE V10", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "KISS", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+
+    st_txt = st_bull ? "BULL ▲" : "BEAR ▼"
+    st_col = st_bull ? color.green : color.red
+    table.cell(d, 0, 1, "SuperTrend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, st_txt, text_color=st_col, text_size=size.small)
+
+    m_txt = close > ema200 ? "Au-dessus ▲" : "En-dessous ▼"
+    m_col = close > ema200 ? color.green : color.red
+    table.cell(d, 0, 2, "EMA 200", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, m_txt, text_color=m_col, text_size=size.small)
+
+    dir_txt = st_bull and macro_bull ? "LONG ▲" : st_bear and macro_bear ? "SHORT ▼" : "NEUTRE"
+    dir_col = st_bull and macro_bull ? color.green : st_bear and macro_bear ? color.red : color.gray
+    table.cell(d, 0, 3, "MODE", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, dir_txt, text_color=dir_col, text_size=size.small, bgcolor=color.new(dir_col, 85))
+
+    pos_txt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    pos_col = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(d, 0, 4, "Position", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, pos_txt, text_color=pos_col, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal,  title="V10 LONG",  message="PE V10 LONG — SuperTrend flip bull | {{close}}")
+alertcondition(short_signal, title="V10 SHORT", message="PE V10 SHORT — SuperTrend flip bear | {{close}}")
