@@ -1,21 +1,22 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM SHORT V4 — Fixed Entries & Exits                                 ║
+// ║  PHANTOM SHORT V5 — Break of Structure                                    ║
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
-// ║  V3 : filtre daily OK (shorte en période baissière)                       ║
-// ║  MAIS : les trades perdent quand même → problème d'entrée/sortie          ║
+// ║  V1-V4 : utilisaient des EMAs pour filtrer le trend → TROP LENT           ║
+// ║  → rate les baisses, entre trop tard, se fait sortir                      ║
 // ║                                                                            ║
-// ║  V4 corrections :                                                          ║
-// ║  1. Entrée plus stricte : bearish engulfing OU pin bar confirmée          ║
-// ║     (pas juste "touche l'EMA")                                            ║
-// ║  2. Confirmation : bougie CLÔTURÉE sous l'EMA (pas juste mèche)          ║
-// ║  3. SL plus large (3x ATR) pour survivre aux bear market rallies         ║
-// ║  4. TP en R:R 2:1 minimum                                                ║
-// ║  5. Anti-overtrading strict : 1 trade tous les 3 jours minimum           ║
+// ║  V5 : STRUCTURE DE PRIX (pas d'EMAs pour le timing)                       ║
+// ║                                                                            ║
+// ║  Concept : quand un swing low est cassé → structure baissière             ║
+// ║            = le marché fait des Lower Lows                                ║
+// ║            → on shorte le RETEST du niveau cassé (support → résistance)   ║
+// ║            OU on shorte la cassure elle-même si momentum fort             ║
+// ║                                                                            ║
+// ║  Pas besoin d'attendre que les EMAs confirment — la STRUCTURE parle.      ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
-strategy("Phantom Short V4 — Fixed Entries", overlay=true,
+strategy("Phantom Short V5 — Break of Structure", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      commission_type=strategy.commission.percent, commission_value=0.075,
      slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
@@ -24,100 +25,116 @@ strategy("Phantom Short V4 — Fixed Entries", overlay=true,
 // PARAMÈTRES
 // ══════════════════════════════════════════════════════════════════════════════
 
-grp1 = "DAILY Trend Filter"
-d_ema_len     = input.int(50,   "Daily EMA Period",   group=grp1)
-d_slope_bars  = input.int(10,   "Slope lookback",     group=grp1)
+grp1 = "Swing Detection"
+swing_len     = input.int(10,  "Swing lookback (barres)",  group=grp1, minval=3,
+     tooltip="Nombre de barres de chaque côté pour identifier un swing low/high. Plus grand = swings plus significatifs.")
+max_swing_age = input.int(100, "Max âge du swing (barres)", group=grp1,
+     tooltip="Ignorer les swings trop anciens")
 
-grp2 = "4H Entry — STRICT"
-ema_fast_len  = input.int(21,   "EMA 4H rapide",       group=grp2)
-ema_mid_len   = input.int(50,   "EMA 4H moyenne",      group=grp2)
-entry_type    = input.string("Engulfing + EMA", "Type d'entrée",
-     options=["Engulfing + EMA", "Pin Bar + EMA", "Les deux"], group=grp2,
-     tooltip="Engulfing = bougie rouge qui avale la précédente à l'EMA\nPin Bar = grande mèche haute à l'EMA")
-close_below   = input.bool(true, "Clôture SOUS l'EMA requise", group=grp2,
-     tooltip="La bougie doit CLÔTURER sous l'EMA, pas juste la toucher avec une mèche")
+grp2 = "Break & Retest Entry"
+break_confirm = input.int(2, "Barres sous le swing pour confirmer la cassure", group=grp2, minval=1,
+     tooltip="Le prix doit rester sous le swing low pendant X barres pour confirmer")
+retest_zone_pct = input.float(1.0, "Zone de retest (%)", step=0.25, group=grp2,
+     tooltip="Le prix doit revenir à moins de X% du niveau cassé pour un retest")
+require_rejection = input.bool(true, "Rejet au retest requis", group=grp2)
 
-grp3 = "Momentum"
+grp3 = "Filtres"
+use_ema_filter = input.bool(true, "Prix sous EMA 50 (filtre léger)", group=grp3,
+     tooltip="Filtre basique pour éviter de shorter en plein bull — mais PAS pour le timing")
+ema_filter_len = input.int(50, "EMA Period", group=grp3)
 rsi_len       = input.int(14,   "RSI Period", group=grp3)
-rsi_max       = input.float(55, "RSI max", step=5.0, group=grp3)
+rsi_max       = input.float(60, "RSI max", step=5.0, group=grp3)
 rsi_min       = input.float(20, "RSI min", step=5.0, group=grp3)
 
-grp4 = "Risk — LARGE STOPS (bear market rallies)"
+grp4 = "Risk Management"
 atr_len       = input.int(14,    "ATR Period",     group=grp4)
-sl_atr_mult   = input.float(3.0, "SL (x ATR)",     step=0.25, group=grp4,
-     tooltip="SL large pour absorber les mèches et rallies. Bear markets = volatilité extrême.")
-rr_ratio      = input.float(2.0, "Risk:Reward ratio", step=0.25, group=grp4,
-     tooltip="TP = SL × R:R. Avec SL=3 ATR et R:R=2, TP = 6 ATR")
+sl_type       = input.string("Au-dessus du retest high", "SL Type",
+     options=["Au-dessus du retest high", "ATR fixe"], group=grp4)
+sl_atr_mult   = input.float(2.5, "SL ATR mult (si ATR fixe)", step=0.25, group=grp4)
+sl_buffer_pct = input.float(0.5, "SL buffer au-dessus du high (%)", step=0.1, group=grp4)
+rr_ratio      = input.float(2.5, "Risk:Reward ratio", step=0.25, group=grp4)
 use_trailing   = input.bool(true, "Trailing Stop", group=grp4)
-trail_atr_mult = input.float(3.0, "Trail (x ATR)", step=0.25, group=grp4)
-max_bars      = input.int(40,    "Max barres",      group=grp4)
+trail_atr_mult = input.float(2.5, "Trail (x ATR)", step=0.25, group=grp4)
+max_bars      = input.int(50,    "Max barres en position", group=grp4)
 
-grp5 = "Anti-overtrading STRICT"
-min_bars_between = input.int(18, "Min barres entre trades (18 = 3 jours en 4H)", group=grp5)
-
-// ══════════════════════════════════════════════════════════════════════════════
-// DAILY TREND (HTF)
-// ══════════════════════════════════════════════════════════════════════════════
-
-d_ema     = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema_len), lookahead=barmerge.lookahead_off)
-d_close   = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
-d_ema_old = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema_len)[d_slope_bars], lookahead=barmerge.lookahead_off)
-
-daily_bearish = d_close < d_ema and d_ema < d_ema_old
+grp5 = "Anti-overtrading"
+min_bars_between = input.int(12, "Min barres entre trades", group=grp5)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 4H INDICATORS
+// SWING DETECTION — pivots
 // ══════════════════════════════════════════════════════════════════════════════
 
-ema_fast = ta.ema(close, ema_fast_len)
-ema_mid  = ta.ema(close, ema_mid_len)
-atr_val  = ta.atr(atr_len)
-rsi_val  = ta.rsi(close, rsi_len)
-[macd_line, signal_line, macd_hist] = ta.macd(close, 12, 26, 9)
+// Swing Low = point le plus bas avec swing_len barres de chaque côté plus hautes
+swing_lo = ta.pivotlow(low, swing_len, swing_len)
+swing_hi = ta.pivotlow(high, swing_len, swing_len)  // not used for entry but for context
 
-// Structure 4H baissière
-local_bearish = ema_fast < ema_mid
+// Garder en mémoire le dernier swing low confirmé
+var float last_swing_low = na
+var int   last_swing_bar = na
+var bool  swing_broken   = false
+var bool  retest_ready   = false
+var float broken_level   = na
+
+// Quand un nouveau swing low est détecté
+if not na(swing_lo)
+    last_swing_low := swing_lo
+    last_swing_bar := bar_index - swing_len  // le pivot est swing_len barres en arrière
+    swing_broken   := false
+    retest_ready   := false
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ENTRY PATTERNS — beaucoup plus stricts que V3
+// BREAK DETECTION — cassure du swing low
 // ══════════════════════════════════════════════════════════════════════════════
 
-// === BEARISH ENGULFING à l'EMA ===
-// Bougie actuelle rouge, avale le corps de la précédente, haute touche/dépasse l'EMA
-prev_green  = close[1] > open[1]
-curr_red    = close < open
-engulfs     = close < open[1] and open > close[1]  // corps rouge avale le vert
-at_ema_eng  = high >= ema_fast * 0.997 or high >= ema_mid * 0.997  // touche l'EMA (0.3% tolérance)
-bearish_engulfing = prev_green and curr_red and engulfs and at_ema_eng
+// Le prix casse sous le dernier swing low
+swing_age = bar_index - nz(last_swing_bar, 0)
+swing_valid = not na(last_swing_low) and swing_age <= max_swing_age
 
-// === PIN BAR (rejet) à l'EMA ===
-// Grande mèche haute (>50% du range), petit corps, haute touche l'EMA
+// Compter les barres consécutives sous le swing low
+var int bars_below = 0
+if swing_valid and close < last_swing_low
+    bars_below += 1
+else
+    bars_below := 0
+
+// Cassure confirmée : X barres consécutives sous le swing low
+if swing_valid and not swing_broken and bars_below >= break_confirm
+    swing_broken := true
+    retest_ready := true
+    broken_level := last_swing_low
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RETEST DETECTION — le prix revient au niveau cassé
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Le prix remonte vers le niveau cassé (ancien support = nouvelle résistance)
+at_retest = retest_ready and not na(broken_level) and
+     high >= broken_level * (1 - retest_zone_pct/100) and
+     close < broken_level * (1 + retest_zone_pct/100)
+
+// Bougie de rejet au niveau du retest
 wick_up      = high - math.max(open, close)
-wick_dn      = math.min(open, close) - low
 body_size    = math.abs(close - open)
 candle_range = high - low
-at_ema_pin   = high >= ema_fast * 0.997 or high >= ema_mid * 0.997
-pin_bar      = candle_range > 0 and wick_up > candle_range * 0.5 and wick_up > body_size * 2.0 and at_ema_pin
+bearish_close = close < open
 
-// Pattern sélectionné
-pattern_ok = switch entry_type
-    "Engulfing + EMA" => bearish_engulfing
-    "Pin Bar + EMA"   => pin_bar
-    "Les deux"        => bearish_engulfing or pin_bar
+rejection = candle_range > 0 and (
+     (wick_up > body_size * 1.0 and wick_up > candle_range * 0.35) or
+     (bearish_close and body_size > candle_range * 0.45 and high >= broken_level * 0.997)
+     )
 
-// === CLÔTURE SOUS L'EMA (confirmation) ===
-close_confirmed = not close_below or (close < ema_fast and close < ema_mid)
-
-// === PRIX VENAIT D'EN-DESSOUS (c'est un pullback UP, pas une chute continue) ===
-was_lower  = low[1] < low[2] or low[2] < low[3]  // on venait de plus bas
-came_up    = high > high[2]                         // on est remonté
+cond_reject = not require_rejection or rejection
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MOMENTUM
+// FILTRES
 // ══════════════════════════════════════════════════════════════════════════════
 
-cond_rsi  = rsi_val <= rsi_max and rsi_val >= rsi_min
-cond_macd = macd_line < 0
+ema_filter = ta.ema(close, ema_filter_len)
+atr_val    = ta.atr(atr_len)
+rsi_val    = ta.rsi(close, rsi_len)
+
+cond_ema = not use_ema_filter or close < ema_filter
+cond_rsi = rsi_val <= rsi_max and rsi_val >= rsi_min
 
 // ══════════════════════════════════════════════════════════════════════════════
 // COOLDOWN
@@ -132,7 +149,11 @@ no_pos = strategy.position_size == 0
 // SIGNAL
 // ══════════════════════════════════════════════════════════════════════════════
 
-short_signal = daily_bearish and local_bearish and pattern_ok and close_confirmed and cond_rsi and cond_macd and cooldown_ok and no_pos
+short_signal = at_retest and cond_reject and cond_ema and cond_rsi and cooldown_ok and no_pos
+
+// Après un trade sur ce niveau, désactiver le retest
+if short_signal
+    retest_ready := false
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ORDRES
@@ -141,8 +162,11 @@ short_signal = daily_bearish and local_bearish and pattern_ok and close_confirme
 var int bars_in_trade = 0
 
 if short_signal
-    float risk    = atr_val * sl_atr_mult
-    float sl_level = close + risk
+    float sl_level = sl_type == "Au-dessus du retest high" ?
+         high * (1 + sl_buffer_pct/100) :
+         close + atr_val * sl_atr_mult
+
+    float risk = sl_level - close
     float tp_level = close - risk * rr_ratio
 
     bars_in_trade := 0
@@ -164,27 +188,28 @@ if strategy.position_size < 0
 if strategy.position_size < 0 and bars_in_trade >= max_bars
     strategy.close("S", comment="Timeout")
 
-// Trend flip → sortie
-if strategy.position_size < 0 and not daily_bearish
-    strategy.close("S", comment="Daily Flip")
-
 // ══════════════════════════════════════════════════════════════════════════════
 // AFFICHAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
-plot(ema_fast, "EMA 21",     color.new(color.yellow, 20), linewidth=1)
-plot(ema_mid,  "EMA 50",     color.new(color.aqua, 20),   linewidth=2)
-plot(d_ema,    "Daily EMA50", color.new(color.fuchsia, 20), linewidth=3, style=plot.style_stepline)
+// EMA filtre (léger)
+plot(use_ema_filter ? ema_filter : na, "EMA Filter", color.new(color.aqua, 40), linewidth=1)
 
-bgcolor(daily_bearish ? color.new(color.red, 93) : na, title="Daily Bear Zone")
+// Swing lows détectés
+plotshape(not na(swing_lo), title="Swing Low", location=location.belowbar,
+     style=shape.circle, size=size.tiny, color=color.new(color.blue, 20), offset=-swing_len)
 
-// Patterns détectés (pour debug)
-plotshape(bearish_engulfing and daily_bearish and not short_signal and no_pos,
-     title="Engulfing", location=location.abovebar, style=shape.diamond,
-     size=size.tiny, color=color.new(color.orange, 30), text="E")
-plotshape(pin_bar and daily_bearish and not short_signal and no_pos,
-     title="Pin", location=location.abovebar, style=shape.diamond,
-     size=size.tiny, color=color.new(color.purple, 30), text="P")
+// Niveau cassé (ligne horizontale via plot)
+plot(retest_ready ? broken_level : na, "Broken Level", color.new(color.red, 20),
+     linewidth=2, style=plot.style_linebr)
+
+// Cassure détectée
+plotshape(swing_broken and swing_broken[1] == false, title="BREAK", location=location.belowbar,
+     style=shape.labeldown, size=size.small, color=color.new(color.red, 10),
+     text="BRK", textcolor=color.white, offset=0)
+
+// Retest zone
+bgcolor(at_retest and no_pos ? color.new(color.orange, 85) : na, title="Retest Zone")
 
 // Signal SHORT
 plotshape(short_signal, title="SHORT", location=location.abovebar,
@@ -195,42 +220,45 @@ plotshape(short_signal, title="SHORT", location=location.abovebar,
 // ══════════════════════════════════════════════════════════════════════════════
 
 if barstate.islast
-    var table d = table.new(position=position.top_right, rows=9, columns=2,
+    var table d = table.new(position=position.top_right, rows=8, columns=2,
          bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
 
     table.cell(d, 0, 0, "PHANTOM", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 0, "SHORT V4", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "SHORT V5", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
 
-    table.cell(d, 0, 1, "Daily Trend", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 1, daily_bearish ? "BEARISH" : "NO SHORT", text_color=daily_bearish ? color.red : color.green, text_size=size.small)
+    // Swing low
+    table.cell(d, 0, 1, "Last Swing Low", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, na(last_swing_low) ? "—" : str.tostring(last_swing_low, "#"), text_color=color.white, text_size=size.small)
 
-    table.cell(d, 0, 2, "4H Stack", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 2, local_bearish ? "Bear" : "Bull", text_color=local_bearish ? color.red : color.green, text_size=size.small)
+    // Broken
+    table.cell(d, 0, 2, "Cassé ?", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, swing_broken ? "OUI — " + str.tostring(broken_level, "#") : "NON", text_color=swing_broken ? color.red : color.gray, text_size=size.small)
 
-    table.cell(d, 0, 3, "Pattern", text_color=color.white, text_size=size.small)
-    p_txt = bearish_engulfing ? "ENGULFING" : pin_bar ? "PIN BAR" : "—"
-    table.cell(d, 1, 3, p_txt, text_color=pattern_ok ? color.red : color.gray, text_size=size.small)
+    // Retest
+    table.cell(d, 0, 3, "Retest Ready", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, retest_ready ? "EN ATTENTE" : "—", text_color=retest_ready ? color.orange : color.gray, text_size=size.small)
 
-    table.cell(d, 0, 4, "Close < EMA", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 4, close_confirmed ? "OUI" : "NON", text_color=close_confirmed ? color.red : color.gray, text_size=size.small)
+    // At retest
+    table.cell(d, 0, 4, "Au niveau", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, at_retest ? "RETEST !" : "—", text_color=at_retest ? color.red : color.gray, text_size=size.small)
 
+    // RSI
     table.cell(d, 0, 5, "RSI", text_color=color.white, text_size=size.small)
     table.cell(d, 1, 5, str.tostring(rsi_val, "#.0"), text_color=cond_rsi ? color.white : color.red, text_size=size.small)
 
-    table.cell(d, 0, 6, "R:R", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, "1:" + str.tostring(rr_ratio, "#.0"), text_color=color.white, text_size=size.small)
-
+    // Position
     pos_txt = strategy.position_size < 0 ? "SHORT (" + str.tostring(bars_in_trade) + "/" + str.tostring(max_bars) + ")" : "FLAT"
-    table.cell(d, 0, 7, "Position", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 7, pos_txt, text_color=strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
+    table.cell(d, 0, 6, "Position", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, pos_txt, text_color=strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
 
-    table.cell(d, 0, 8, "Cooldown", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 8, cooldown_ok ? "OK" : str.tostring(min_bars_between - bars_since_trade) + " bars", text_color=cooldown_ok ? color.green : color.orange, text_size=size.small)
+    // R:R
+    table.cell(d, 0, 7, "R:R", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, "1:" + str.tostring(rr_ratio, "#.0"), text_color=color.white, text_size=size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ALERTES
 // ══════════════════════════════════════════════════════════════════════════════
 
-alertcondition(short_signal, title="PS V4 SHORT", message="PHANTOM SHORT V4 — {{close}}")
-alertcondition(daily_bearish and not daily_bearish[1], title="Bear Start", message="Daily BEARISH — shorts ON")
-alertcondition(not daily_bearish and daily_bearish[1], title="Bear End", message="Daily BULLISH — shorts OFF")
+alertcondition(short_signal, title="PS V5 SHORT", message="PHANTOM SHORT V5 — Break & Retest | {{close}}")
+alertcondition(swing_broken and not swing_broken[1], title="Structure Break", message="Swing Low cassé — retest attendu | {{close}}")
+alertcondition(at_retest and no_pos, title="Retest", message="Retest du niveau cassé | {{close}}")
