@@ -34,8 +34,7 @@ ema_macro  = input.int(200, "EMA macro",  minval=100, group=grp2)
 
 grp3 = "Direction"
 allow_long  = input.bool(true,  "Autoriser LONG",  group=grp3)
-allow_short = input.bool(false, "Autoriser SHORT", group=grp3,
-     tooltip="Désactivé par défaut. Activer UNIQUEMENT si BTC est en bear market (sous EMA200).")
+allow_short = input.bool(true, "Autoriser SHORT", group=grp3)
 short_strict = input.bool(true, "Short strict (sous EMA200 obligatoire)", group=grp3,
      tooltip="Si activé, les shorts ne se déclenchent que si le prix est sous EMA200")
 
