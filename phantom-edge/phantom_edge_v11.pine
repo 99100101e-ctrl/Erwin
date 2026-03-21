@@ -1,0 +1,236 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V11 — Smart Direction (basé sur V8 4H qui marche)           ║
+// ║  © Erwin 2026                                                              ║
+// ║                                                                            ║
+// ║  FAIT : V8 en 4H marche pour les LONGS, shorts = inverse                  ║
+// ║  CAUSE : BTC en tendance haussière → shorter = perdre de l'argent         ║
+// ║                                                                            ║
+// ║  SOLUTION :                                                                ║
+// ║  → Garder la logique V8 qui marche pour les longs                         ║
+// ║  → Shorts DÉSACTIVÉS par défaut (option pour activer)                     ║
+// ║  → Si shorts activés : seulement quand prix SOUS EMA 200                 ║
+// ║    (= vrai bear market, pas juste un dip dans un bull run)                ║
+// ║  → Optimisé pour 4H                                                       ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V11 — Smart Direction", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "SuperTrend"
+st_factor  = input.float(3.0, "Factor",     step=0.5, group=grp1)
+st_period  = input.int(10,    "ATR Period",  minval=5, group=grp1)
+
+grp2 = "EMAs"
+ema_fast   = input.int(21,  "EMA rapide", minval=5,  group=grp2)
+ema_slow   = input.int(50,  "EMA lente",  minval=20, group=grp2)
+ema_macro  = input.int(200, "EMA macro",  minval=100, group=grp2)
+
+grp3 = "Direction"
+allow_long  = input.bool(true,  "Autoriser LONG",  group=grp3)
+allow_short = input.bool(false, "Autoriser SHORT", group=grp3,
+     tooltip="Désactivé par défaut. Activer UNIQUEMENT si BTC est en bear market (sous EMA200).")
+short_strict = input.bool(true, "Short strict (sous EMA200 obligatoire)", group=grp3,
+     tooltip="Si activé, les shorts ne se déclenchent que si le prix est sous EMA200")
+
+grp4 = "Pullback"
+ema_pb_len  = input.int(21,    "EMA pullback", minval=5, group=grp4)
+pb_zone_pct = input.float(0.5, "Zone (%)",     step=0.1, group=grp4)
+
+grp5 = "Risk"
+atr_len     = input.int(14,    "ATR Period",         group=grp5)
+sl_atr_mult = input.float(2.0, "SL (x ATR)",         step=0.25, group=grp5)
+use_trail   = input.bool(true, "Trailing Stop",       group=grp5)
+trail_mult  = input.float(2.0, "Trail (x ATR)",       step=0.25, group=grp5)
+tp_rr       = input.float(3.0, "TP (x risque) si pas trail", step=0.25, group=grp5)
+
+grp6 = "Session"
+use_sess    = input.bool(false, "Session Filter", group=grp6)
+sess_open   = input.int(7,  "Open (UTC)",  group=grp6)
+sess_close  = input.int(21, "Close (UTC)", group=grp6)
+max_daily   = input.int(3,  "Max Trades/Jour", group=grp6)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATEURS (tous sur le chart courant — pas de request.security)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// SuperTrend
+[st_value, st_dir] = ta.supertrend(st_factor, st_period)
+st_bull = st_dir < 0
+st_bear = st_dir > 0
+
+// EMAs
+ema_f   = ta.ema(close, ema_fast)
+ema_s   = ta.ema(close, ema_slow)
+ema200  = ta.ema(close, ema_macro)
+
+// Alignement EMA
+ema_bull = ema_f > ema_s
+ema_bear = ema_f < ema_s
+
+// Pullback EMA
+ema_pb  = ta.ema(close, ema_pb_len)
+pb_zone = ema_pb * pb_zone_pct / 100
+
+atr_val = ta.atr(atr_len)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONDITIONS TREND
+// SuperTrend + EMA alignées = trend confirmé
+// ══════════════════════════════════════════════════════════════════════════════
+
+trend_up   = st_bull and ema_bull    // SuperTrend bull + EMA 21 > 50
+trend_down = st_bear and ema_bear    // SuperTrend bear + EMA 21 < 50
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONDITIONS PULLBACK
+// Prix revient vers EMA21 puis repart dans le sens du trend
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG : prix touche/approche EMA21 et ferme au-dessus (rebond)
+pb_long  = low <= ema_pb + pb_zone and close > ema_pb and close > open
+// SHORT : prix touche/approche EMA21 et ferme en-dessous (rejet)
+pb_short = high >= ema_pb - pb_zone and close < ema_pb and close < open
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FILTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+in_session = not use_sess or (hr >= sess_open and hr < sess_close)
+
+var int day_trades = 0
+if ta.change(dayofmonth(time)) != 0
+    day_trades := 0
+can_trade = day_trades < max_daily
+no_pos = strategy.position_size == 0
+
+// Filtre macro pour shorts : prix doit être sous EMA200
+short_macro_ok = not short_strict or close < ema200
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX FINAUX
+// ══════════════════════════════════════════════════════════════════════════════
+
+long_signal  = allow_long  and trend_up   and pb_long  and in_session and can_trade and no_pos
+short_signal = allow_short and trend_down and pb_short and short_macro_ok and in_session and can_trade and no_pos
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GESTION DES ORDRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float trail_long  = na
+var float trail_short = na
+
+// Fermer sur flip SuperTrend (protection)
+if st_bear and strategy.position_size > 0
+    strategy.close("L", comment="ST Flip ▼")
+    trail_long := na
+
+if st_bull and strategy.position_size < 0
+    strategy.close("S", comment="ST Flip ▲")
+    trail_short := na
+
+// --- LONG ---
+if long_signal
+    float sl   = close - atr_val * sl_atr_mult
+    float risk = close - sl
+    if risk > 0
+        day_trades += 1
+        trail_long  := sl
+        trail_short := na
+        strategy.entry("L", strategy.long)
+        if not use_trail
+            strategy.exit("L_exit", "L", stop=sl, limit=close + risk * tp_rr)
+
+// --- SHORT ---
+if short_signal
+    float sl   = close + atr_val * sl_atr_mult
+    float risk = sl - close
+    if risk > 0
+        day_trades += 1
+        trail_short := sl
+        trail_long  := na
+        strategy.entry("S", strategy.short)
+        if not use_trail
+            strategy.exit("S_exit", "S", stop=sl, limit=close - risk * tp_rr)
+
+// --- Trailing ---
+if use_trail and strategy.position_size > 0 and not na(trail_long)
+    trail_long := math.max(trail_long, close - atr_val * trail_mult)
+    if close <= trail_long
+        strategy.close("L", comment="Trail")
+        trail_long := na
+
+if use_trail and strategy.position_size < 0 and not na(trail_short)
+    trail_short := math.min(trail_short, close + atr_val * trail_mult)
+    if close >= trail_short
+        strategy.close("S", comment="Trail")
+        trail_short := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(st_value, "SuperTrend", st_bull ? color.green : color.red, linewidth=3, style=plot.style_stepline)
+plot(ema_f,   "EMA 21",  color.new(color.aqua, 30),   linewidth=1)
+plot(ema_s,   "EMA 50",  color.new(color.orange, 30),  linewidth=2)
+plot(ema200,  "EMA 200", color.new(color.white, 40),   linewidth=2)
+plot(ema_pb,  "EMA PB",  color.new(color.yellow, 50),  linewidth=1)
+
+plot(strategy.position_size > 0 and use_trail ? trail_long  : na, "Trail L", color.new(color.lime, 30), linewidth=1, style=plot.style_stepline)
+plot(strategy.position_size < 0 and use_trail ? trail_short : na, "Trail S", color.new(color.fuchsia, 30), linewidth=1, style=plot.style_stepline)
+
+bgcolor(trend_up ? color.new(color.green, 94) : trend_down ? color.new(color.red, 94) : color.new(color.gray, 97))
+
+plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=#00FF88, text="▲ L")
+plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=#FF4444, text="▼ S")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=7, columns=2,
+         bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
+
+    table.cell(d, 0, 0, "PE V11", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "Smart Dir", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+
+    st_txt = st_bull ? "BULL ▲" : "BEAR ▼"
+    table.cell(d, 0, 1, "SuperTrend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, st_txt, text_color=st_bull ? color.green : color.red, text_size=size.small)
+
+    table.cell(d, 0, 2, "EMA 21/50", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, ema_bull ? "Bull ▲" : "Bear ▼", text_color=ema_bull ? color.green : color.red, text_size=size.small)
+
+    macro_txt = close > ema200 ? "Au-dessus ▲" : "En-dessous ▼"
+    table.cell(d, 0, 3, "EMA 200", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, macro_txt, text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+
+    mode_txt = allow_long and not allow_short ? "LONG ONLY" : allow_long and allow_short ? "LONG + SHORT" : "SHORT ONLY"
+    table.cell(d, 0, 4, "Mode", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, mode_txt, text_color=color.aqua, text_size=size.small)
+
+    dir_txt = trend_up ? "▲ ACHAT" : trend_down ? "▼ VENTE" : "— NEUTRE"
+    dir_col = trend_up ? color.green : trend_down ? color.red : color.gray
+    table.cell(d, 0, 5, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, dir_txt, text_color=dir_col, text_size=size.small, bgcolor=color.new(dir_col, 85))
+
+    pos_txt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    pos_col = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(d, 0, 6, "Position", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, pos_txt, text_color=pos_col, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal,  title="V11 LONG",  message="PE V11 LONG — Trend up + Pullback | {{close}}")
+alertcondition(short_signal, title="V11 SHORT", message="PE V11 SHORT — Trend down + Pullback | {{close}}")
