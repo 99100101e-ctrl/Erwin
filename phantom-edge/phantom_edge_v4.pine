@@ -1,0 +1,364 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V4 — Smart Money Engine                                      ║
+// ║  © Erwin 2026 — Architecture Multi-Algorithmes                             ║
+// ║                                                                            ║
+// ║  ALGO 1: Market Structure BOS/CHoCH (Smart Money Concepts)                ║
+// ║  ALGO 2: Order Flow Imbalance Score (pression institutionnelle)            ║
+// ║  ALGO 3: VWAP Dynamique (ancre institutionnelle)                           ║
+// ║  ALGO 4: Momentum Composite (RSI + ROC pondéré)                           ║
+// ║  ALGO 5: Volatility Squeeze (compression → explosion)                     ║
+// ║                                                                            ║
+// ║  Système de score 0-10 → Signal seulement si score ≥ seuil               ║
+// ║  Timeframe : 15m | Instrument : BTCUSDT                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V4 — Smart Money Engine", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "Market Structure (Algo 1)"
+bos_lookback = input.int(10, "BOS Swing Period", minval=5, maxval=30, group=grp1)
+
+grp2 = "Order Flow (Algo 2)"
+of_lookback = input.int(8, "Order Flow Lookback", minval=3, maxval=20, group=grp2)
+of_min_score = input.float(0.55, "Min Order Flow Ratio", step=0.05, group=grp2)
+
+grp3 = "VWAP (Algo 3)"
+vwap_band_mult = input.float(1.5, "VWAP Band Multiplier", step=0.1, group=grp3)
+
+grp4 = "Momentum (Algo 4)"
+rsi_period = input.int(10, "RSI Period", minval=5, group=grp4)
+roc_period = input.int(10, "ROC Period", minval=5, group=grp4)
+
+grp5 = "Volatility Squeeze (Algo 5)"
+bb_len = input.int(20, "BB Length", group=grp5)
+bb_mult = input.float(2.0, "BB Multiplier", step=0.1, group=grp5)
+kc_len = input.int(20, "KC Length", group=grp5)
+kc_mult = input.float(1.5, "KC Multiplier", step=0.1, group=grp5)
+
+grp6 = "Signal Engine"
+min_score = input.int(6, "Min Score to Trade (0-10)", minval=4, maxval=10, group=grp6)
+
+grp7 = "Risk Management"
+atr_len = input.int(14, "ATR Period", group=grp7)
+sl_mult = input.float(1.2, "SL Multiplier (ATR)", step=0.1, group=grp7)
+tp_ratio = input.float(3.0, "TP/Risk Ratio", step=0.25, group=grp7)
+max_daily = input.int(2, "Max Trades/Day", minval=1, group=grp7)
+
+grp8 = "Session Filter"
+use_session = input.bool(true, "Use Session Filter", group=grp8)
+lon_start = input.int(7, "London Open (UTC)", group=grp8)
+lon_end = input.int(12, "London Close (UTC)", group=grp8)
+ny_start = input.int(12, "NY Open (UTC)", group=grp8)
+ny_end = input.int(17, "NY Close (UTC)", group=grp8)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BASE INDICATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+atr_val = ta.atr(atr_len)
+vol_ma = ta.sma(volume, 20)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALGO 1 : MARKET STRUCTURE — Break of Structure / Change of Character
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Swing highs and lows
+swing_high = ta.pivothigh(high, bos_lookback, bos_lookback)
+swing_low  = ta.pivotlow(low, bos_lookback, bos_lookback)
+
+// Track last confirmed swing levels
+var float last_swing_high = na
+var float last_swing_low = na
+
+if not na(swing_high)
+    last_swing_high := swing_high
+if not na(swing_low)
+    last_swing_low := swing_low
+
+// Break of Structure
+bos_bull = not na(last_swing_high) and close > last_swing_high and close[1] <= last_swing_high
+bos_bear = not na(last_swing_low) and close < last_swing_low and close[1] >= last_swing_low
+
+// Market Structure Bias (rolling trend direction)
+var int ms_bias = 0  // 1 = bullish, -1 = bearish
+if bos_bull
+    ms_bias := 1
+if bos_bear
+    ms_bias := -1
+
+// Change of Character (reversal after trend)
+choch_bull = ms_bias == -1 and bos_bull
+choch_bear = ms_bias == 1 and bos_bear
+
+// Algo 1 score contribution (0-2 pts)
+algo1_bull = ms_bias == 1 ? 2 : choch_bull ? 1 : 0
+algo1_bear = ms_bias == -1 ? 2 : choch_bear ? 1 : 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALGO 2 : ORDER FLOW IMBALANCE SCORE
+// Mesure la pression institutionnelle via l'analyse des bougies
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Candle body ratio (force de la bougie)
+body = math.abs(close - open)
+candle_range = high - low
+body_ratio = candle_range > 0 ? body / candle_range : 0.0
+
+// Bullish/bearish candle power (close position in range)
+close_position = candle_range > 0 ? (close - low) / candle_range : 0.5
+
+// Cumulative delta approximation (buyers vs sellers)
+delta = close > open ? volume : close < open ? -volume : 0.0
+cum_delta = math.sum(delta, of_lookback)
+total_volume = math.sum(volume, of_lookback)
+
+of_ratio = total_volume > 0 ? math.abs(cum_delta) / total_volume : 0.0
+of_bull_bias = cum_delta > 0 and of_ratio >= of_min_score
+of_bear_bias = cum_delta < 0 and of_ratio >= of_min_score
+
+// Absorptions (high volume + small body = absorption)
+big_volume = volume > vol_ma * 1.5
+small_body = body_ratio < 0.3
+absorption_bull = big_volume and small_body and close > open  // buyers absorbed sellers
+absorption_bear = big_volume and small_body and close < open  // sellers absorbed buyers
+
+// Algo 2 score (0-3 pts)
+algo2_bull = (of_bull_bias ? 2 : 0) + (absorption_bull ? 1 : 0)
+algo2_bear = (of_bear_bias ? 2 : 0) + (absorption_bear ? 1 : 0)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALGO 3 : VWAP DYNAMIQUE
+// Position institutionnelle du prix
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Standard VWAP (daily reset)
+var float vwap_sum = 0.0
+var float vol_sum = 0.0
+var float prev_day = na
+
+if ta.change(dayofmonth(time)) != 0
+    vwap_sum := 0.0
+    vol_sum := 0.0
+
+typical_price = (high + low + close) / 3.0
+vwap_sum += typical_price * volume
+vol_sum += volume
+vwap = vol_sum > 0 ? vwap_sum / vol_sum : na
+
+// VWAP standard deviation bands
+vwap_variance = ta.sma(math.pow(typical_price - vwap, 2), bb_len)
+vwap_stdev = math.sqrt(vwap_variance)
+vwap_upper = vwap + vwap_stdev * vwap_band_mult
+vwap_lower = vwap - vwap_stdev * vwap_band_mult
+
+// Price vs VWAP analysis
+above_vwap = not na(vwap) and close > vwap
+below_vwap = not na(vwap) and close < vwap
+bouncing_vwap_bull = not na(vwap) and low <= vwap and close > vwap  // bounced off VWAP up
+bouncing_vwap_bear = not na(vwap) and high >= vwap and close < vwap  // bounced off VWAP down
+near_vwap_lower = not na(vwap_lower) and low <= vwap_lower * 1.001  // touched lower band
+near_vwap_upper = not na(vwap_upper) and high >= vwap_upper * 0.999 // touched upper band
+
+// Algo 3 score (0-2 pts)
+algo3_bull = (bouncing_vwap_bull ? 1 : 0) + (near_vwap_lower ? 1 : 0)
+algo3_bear = (bouncing_vwap_bear ? 1 : 0) + (near_vwap_upper ? 1 : 0)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALGO 4 : MOMENTUM COMPOSITE
+// RSI + Rate of Change pondérés
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsi_val = ta.rsi(close, rsi_period)
+roc_val = (close - close[roc_period]) / close[roc_period] * 100.0
+
+// RSI Zones
+rsi_bullish = rsi_val > 50 and rsi_val < 70  // healthy bullish momentum
+rsi_bearish = rsi_val < 50 and rsi_val > 30  // healthy bearish momentum
+rsi_oversold = rsi_val <= 35                  // oversold reversal zone
+rsi_overbought = rsi_val >= 65                // overbought reversal zone
+
+// RSI Divergence (simplified)
+rsi_momentum_up = rsi_val > rsi_val[3] and close > close[3]    // aligned
+rsi_momentum_dn = rsi_val < rsi_val[3] and close < close[3]    // aligned
+rsi_div_bull = close < close[3] and rsi_val > rsi_val[3]        // bullish divergence
+rsi_div_bear = close > close[3] and rsi_val < rsi_val[3]        // bearish divergence
+
+// ROC momentum
+roc_bull = roc_val > 0.3 and roc_val > roc_val[1]
+roc_bear = roc_val < -0.3 and roc_val < roc_val[1]
+
+// Momentum composite score (0-2 pts)
+algo4_bull = ((rsi_bullish or rsi_oversold or rsi_div_bull) ? 1 : 0) + (roc_bull ? 1 : 0)
+algo4_bear = ((rsi_bearish or rsi_overbought or rsi_div_bear) ? 1 : 0) + (roc_bear ? 1 : 0)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALGO 5 : VOLATILITY SQUEEZE (Compression → Explosion)
+// Bollinger Bands dans Keltner Channels
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Bollinger Bands
+bb_basis = ta.sma(close, bb_len)
+bb_stdev = ta.stdev(close, bb_len)
+bb_upper = bb_basis + bb_stdev * bb_mult
+bb_lower = bb_basis - bb_stdev * bb_mult
+
+// Keltner Channel
+kc_basis = ta.ema(close, kc_len)
+kc_range = ta.atr(kc_len)
+kc_upper = kc_basis + kc_range * kc_mult
+kc_lower = kc_basis - kc_range * kc_mult
+
+// Squeeze: BB inside KC = compression
+squeeze_on = bb_upper < kc_upper and bb_lower > kc_lower
+squeeze_off = not squeeze_on  // explosion
+
+// Momentum bar (direction of expansion)
+squeeze_hist = close - ta.linreg(close, bb_len, 0)
+sq_expanding_bull = squeeze_off and squeeze_hist > 0 and squeeze_hist > squeeze_hist[1]
+sq_expanding_bear = squeeze_off and squeeze_hist < 0 and squeeze_hist < squeeze_hist[1]
+
+// Algo 5 score (0-1 pt)
+algo5_bull = sq_expanding_bull ? 1 : 0
+algo5_bear = sq_expanding_bear ? 1 : 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAL ENGINE — Score Composite
+// ══════════════════════════════════════════════════════════════════════════════
+
+total_bull_score = algo1_bull + algo2_bull + algo3_bull + algo4_bull + algo5_bull
+total_bear_score = algo1_bear + algo2_bear + algo3_bear + algo4_bear + algo5_bear
+
+// Session Filter
+hr = hour(time, "UTC")
+in_session = not use_session or (hr >= lon_start and hr < lon_end) or (hr >= ny_start and hr < ny_end)
+
+// Daily trade limit
+var int day_trades = 0
+if ta.change(dayofmonth(time)) != 0
+    day_trades := 0
+can_trade = day_trades < max_daily
+
+no_position = strategy.position_size == 0
+
+// Final signals — Score ≥ min_score required
+final_long  = total_bull_score >= min_score and volume > vol_ma and in_session and can_trade and no_position
+final_short = total_bear_score >= min_score and volume > vol_ma and in_session and can_trade and no_position
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORDER MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════════════
+
+if final_long
+    float sl = close - atr_val * sl_mult
+    float risk = close - sl
+    if risk > 0 and risk < atr_val * 3
+        float tp = close + risk * tp_ratio
+        day_trades += 1
+        strategy.entry("L", strategy.long)
+        strategy.exit("L_exit", "L", stop=sl, limit=tp)
+
+if final_short
+    float sl = close + atr_val * sl_mult
+    float risk = sl - close
+    if risk > 0 and risk < atr_val * 3
+        float tp = close - risk * tp_ratio
+        day_trades += 1
+        strategy.entry("S", strategy.short)
+        strategy.exit("S_exit", "S", stop=sl, limit=tp)
+
+// Reversal close
+if final_short and strategy.position_size > 0
+    strategy.close("L")
+if final_long and strategy.position_size < 0
+    strategy.close("S")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DISPLAY
+// ══════════════════════════════════════════════════════════════════════════════
+
+// VWAP
+plot(vwap, "VWAP", color.new(color.yellow, 0), linewidth=1)
+plot(vwap_upper, "VWAP +", color.new(color.orange, 60), linewidth=1, style=plot.style_line)
+plot(vwap_lower, "VWAP -", color.new(color.blue, 60), linewidth=1, style=plot.style_line)
+
+// BOS marks
+plotshape(bos_bull, title="BOS Bull", location=location.belowbar, style=shape.labelup, size=size.tiny, color=color.new(color.teal, 0), text="BOS")
+plotshape(bos_bear, title="BOS Bear", location=location.abovebar, style=shape.labeldown, size=size.tiny, color=color.new(color.maroon, 0), text="BOS")
+
+// Entry signals
+plotshape(final_long, title="LONG", location=location.belowbar, style=shape.triangleup, size=size.large, color=color.new(color.green, 0), text="▲ L")
+plotshape(final_short, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=color.new(color.red, 0), text="▼ S")
+
+// Squeeze background
+bgcolor(squeeze_on ? color.new(color.orange, 92) : na, title="Squeeze")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=9, columns=3,
+         bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
+
+    // Header
+    table.cell(d, 0, 0, "PHANTOM EDGE V4", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "BULL", bgcolor=color.new(#FF6600, 20), text_color=color.new(color.green, 0), text_size=size.small)
+    table.cell(d, 2, 0, "BEAR", bgcolor=color.new(#FF6600, 20), text_color=color.new(color.red, 0), text_size=size.small)
+
+    // Algo 1
+    table.cell(d, 0, 1, "Mkt Structure", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, str.tostring(algo1_bull) + "/2", text_color=algo1_bull >= 1 ? color.green : color.gray, text_size=size.small)
+    table.cell(d, 2, 1, str.tostring(algo1_bear) + "/2", text_color=algo1_bear >= 1 ? color.red : color.gray, text_size=size.small)
+
+    // Algo 2
+    table.cell(d, 0, 2, "Order Flow", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, str.tostring(algo2_bull) + "/3", text_color=algo2_bull >= 1 ? color.green : color.gray, text_size=size.small)
+    table.cell(d, 2, 2, str.tostring(algo2_bear) + "/3", text_color=algo2_bear >= 1 ? color.red : color.gray, text_size=size.small)
+
+    // Algo 3
+    table.cell(d, 0, 3, "VWAP", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, str.tostring(algo3_bull) + "/2", text_color=algo3_bull >= 1 ? color.green : color.gray, text_size=size.small)
+    table.cell(d, 2, 3, str.tostring(algo3_bear) + "/2", text_color=algo3_bear >= 1 ? color.red : color.gray, text_size=size.small)
+
+    // Algo 4
+    table.cell(d, 0, 4, "Momentum", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, str.tostring(algo4_bull) + "/2", text_color=algo4_bull >= 1 ? color.green : color.gray, text_size=size.small)
+    table.cell(d, 2, 4, str.tostring(algo4_bear) + "/2", text_color=algo4_bear >= 1 ? color.red : color.gray, text_size=size.small)
+
+    // Algo 5
+    table.cell(d, 0, 5, "Volatility Sq.", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, str.tostring(algo5_bull) + "/1", text_color=algo5_bull >= 1 ? color.green : color.gray, text_size=size.small)
+    table.cell(d, 2, 5, str.tostring(algo5_bear) + "/1", text_color=algo5_bear >= 1 ? color.red : color.gray, text_size=size.small)
+
+    // Total Score
+    score_bull_col = total_bull_score >= min_score ? color.green : color.gray
+    score_bear_col = total_bear_score >= min_score ? color.red : color.gray
+    table.cell(d, 0, 6, "SCORE / " + str.tostring(min_score), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, str.tostring(total_bull_score) + "/10", text_color=score_bull_col, text_size=size.normal)
+    table.cell(d, 2, 6, str.tostring(total_bear_score) + "/10", text_color=score_bear_col, text_size=size.normal)
+
+    // Volume
+    vol_col = volume > vol_ma ? color.green : color.gray
+    table.cell(d, 0, 7, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, str.tostring(volume / vol_ma, "#.##") + "x", text_color=vol_col, text_size=size.small)
+    table.cell(d, 2, 7, squeeze_on ? "SQUEEZE" : "FREE", text_color=squeeze_on ? color.orange : color.gray, text_size=size.small)
+
+    // Trades
+    table.cell(d, 0, 8, "Trades Today", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 8, str.tostring(day_trades) + "/" + str.tostring(max_daily), text_color=day_trades >= max_daily ? color.red : color.white, text_size=size.small)
+    table.cell(d, 2, 8, in_session ? "IN SESSION" : "OUT", text_color=in_session ? color.green : color.gray, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(final_long, title="PE V4 LONG", message="PHANTOM EDGE V4 — LONG {{close}}")
+alertcondition(final_short, title="PE V4 SHORT", message="PHANTOM EDGE V4 — SHORT {{close}}")
+alertcondition(squeeze_on, title="PE V4 SQUEEZE", message="SQUEEZE ACTIF — Explosion imminente {{close}}")
