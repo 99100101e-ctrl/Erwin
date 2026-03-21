@@ -252,7 +252,7 @@ bgcolor(is_trending ? color.new(color.blue, 93) : color.new(color.purple, 93), t
 // ══════════════════════════════════════════════════════════════════════════════
 
 if show_dash and barstate.islast
-    var table d = table.new(position.top_right, 2, 8, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=#444)
+    var table d = table.new(position=position.top_right, rows=8, columns=2, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(#444444, 0))
 
     table.cell(d, 0, 0, "PE V2", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
     table.cell(d, 1, 0, "Simplified", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
