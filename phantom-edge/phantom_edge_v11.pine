@@ -1,20 +1,14 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM EDGE V11 — Smart Direction (basé sur V8 4H qui marche)           ║
+// ║  PHANTOM EDGE V11 — Hybrid (Long pullback + Short V12)                    ║
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
-// ║  FAIT : V8 en 4H marche pour les LONGS, shorts = inverse                  ║
-// ║  CAUSE : BTC en tendance haussière → shorter = perdre de l'argent         ║
-// ║                                                                            ║
-// ║  SOLUTION :                                                                ║
-// ║  → Garder la logique V8 qui marche pour les longs                         ║
-// ║  → Shorts DÉSACTIVÉS par défaut (option pour activer)                     ║
-// ║  → Si shorts activés : seulement quand prix SOUS EMA 200                 ║
-// ║    (= vrai bear market, pas juste un dip dans un bull run)                ║
-// ║  → Optimisé pour 4H                                                       ║
+// ║  LONGS : logique V11 pullback (SuperTrend + EMA alignées + pullback)     ║
+// ║  SHORTS : logique V12 (SuperTrend flip + SL large + 3 modes exit)        ║
+// ║  Les deux ont le Breakeven Stop                                           ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
-strategy("Phantom Edge V11 — Smart Direction", overlay=true,
+strategy("Phantom Edge V11 — Hybrid", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      commission_type=strategy.commission.percent, commission_value=0.075,
      slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
@@ -33,39 +27,53 @@ ema_slow   = input.int(50,  "EMA lente",  minval=20, group=grp2)
 ema_macro  = input.int(200, "EMA macro",  minval=100, group=grp2)
 
 grp3 = "Direction"
-allow_long  = input.bool(true,  "Autoriser LONG",  group=grp3)
+allow_long  = input.bool(true, "Autoriser LONG",  group=grp3)
 allow_short = input.bool(true, "Autoriser SHORT", group=grp3)
-short_strict = input.bool(true, "Short strict (sous EMA200 obligatoire)", group=grp3,
-     tooltip="Si activé, les shorts ne se déclenchent que si le prix est sous EMA200")
 
-grp4 = "Pullback"
+grp4 = "LONG — Pullback"
 ema_pb_len  = input.int(21,    "EMA pullback", minval=5, group=grp4)
 pb_zone_pct = input.float(0.5, "Zone (%)",     step=0.1, group=grp4)
 
-grp5 = "Risk"
+grp5 = "LONG — Risk"
 atr_len     = input.int(14,    "ATR Period",         group=grp5)
-sl_atr_mult = input.float(2.0, "SL (x ATR)",         step=0.25, group=grp5)
-use_trail   = input.bool(true, "Trailing Stop",       group=grp5)
-trail_mult  = input.float(2.0, "Trail (x ATR)",       step=0.25, group=grp5)
-tp_rr       = input.float(3.0, "TP (x risque) si pas trail", step=0.25, group=grp5)
-use_be      = input.bool(true, "Breakeven Stop",      group=grp5,
-     tooltip="Quand le trade atteint X% de profit, le stop passe au prix d'entrée.")
-be_pct      = input.float(5.0, "BE activation (%)",   step=0.5, group=grp5)
+long_sl_mult = input.float(2.0, "Long SL (x ATR)",   step=0.25, group=grp5)
+long_trail   = input.bool(true, "Long Trailing Stop", group=grp5)
+long_trail_m = input.float(2.0, "Long Trail (x ATR)", step=0.25, group=grp5)
+long_tp_rr   = input.float(3.0, "Long TP (x risque) si pas trail", step=0.25, group=grp5)
+long_use_be  = input.bool(true, "Long Breakeven Stop", group=grp5)
+long_be_pct  = input.float(5.0, "Long BE activation (%)", step=0.5, group=grp5)
 
-grp6 = "Session"
-use_sess    = input.bool(false, "Session Filter", group=grp6)
-sess_open   = input.int(7,  "Open (UTC)",  group=grp6)
-sess_close  = input.int(21, "Close (UTC)", group=grp6)
-max_daily   = input.int(3,  "Max Trades/Jour", group=grp6)
+grp6 = "SHORT — Risk (logique V12)"
+short_sl_mult   = input.float(3.0,  "Short SL (x ATR)",        step=0.25, group=grp6,
+     tooltip="Plus large que long — BTC a des bounces violents en baisse")
+short_mode      = input.string("ST Flip", "Short Exit Mode",
+     options=["ST Flip", "Trailing", "Fixed TP"], group=grp6,
+     tooltip="ST Flip: sortie quand SuperTrend redevient bull. Trailing: trail large. Fixed TP: ratio fixe.")
+short_trail_m   = input.float(3.5,  "Short Trail (x ATR)",     step=0.25, group=grp6)
+short_tp_rr     = input.float(2.0,  "Short TP (x risque)",     step=0.25, group=grp6)
+short_use_be    = input.bool(true,  "Short Breakeven Stop",     group=grp6)
+short_be_pct    = input.float(5.0,  "Short BE activation (%)",  step=0.5, group=grp6)
+
+grp7 = "Filtre Macro (shorts)"
+use_ema200_short = input.bool(true, "Shorts sous EMA 200 uniquement", group=grp7)
+
+grp8 = "Session"
+use_sess    = input.bool(false, "Session Filter", group=grp8)
+sess_open   = input.int(7,  "Open (UTC)",  group=grp8)
+sess_close  = input.int(21, "Close (UTC)", group=grp8)
+max_daily   = input.int(3,  "Max Trades/Jour", group=grp8)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// INDICATEURS (tous sur le chart courant — pas de request.security)
+// INDICATEURS
 // ══════════════════════════════════════════════════════════════════════════════
 
 // SuperTrend
 [st_value, st_dir] = ta.supertrend(st_factor, st_period)
 st_bull = st_dir < 0
 st_bear = st_dir > 0
+
+st_flip_bull = st_bull and not st_bull[1]
+st_flip_bear = st_bear and not st_bear[1]
 
 // EMAs
 ema_f   = ta.ema(close, ema_fast)
@@ -74,31 +82,23 @@ ema200  = ta.ema(close, ema_macro)
 
 // Alignement EMA
 ema_bull = ema_f > ema_s
-ema_bear = ema_f < ema_s
 
-// Pullback EMA
+// Pullback EMA (pour longs)
 ema_pb  = ta.ema(close, ema_pb_len)
 pb_zone = ema_pb * pb_zone_pct / 100
 
 atr_val = ta.atr(atr_len)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CONDITIONS TREND
-// SuperTrend + EMA alignées = trend confirmé
+// CONDITIONS
 // ══════════════════════════════════════════════════════════════════════════════
 
-trend_up   = st_bull and ema_bull    // SuperTrend bull + EMA 21 > 50
-trend_down = st_bear and ema_bear    // SuperTrend bear + EMA 21 < 50
-
-// ══════════════════════════════════════════════════════════════════════════════
-// CONDITIONS PULLBACK
-// Prix revient vers EMA21 puis repart dans le sens du trend
-// ══════════════════════════════════════════════════════════════════════════════
-
-// LONG : prix touche/approche EMA21 et ferme au-dessus (rebond)
+// LONG : SuperTrend bull + EMA alignées + pullback vers EMA21
+trend_up = st_bull and ema_bull
 pb_long  = low <= ema_pb + pb_zone and close > ema_pb and close > open
-// SHORT : prix touche/approche EMA21 et ferme en-dessous (rejet)
-pb_short = high >= ema_pb - pb_zone and close < ema_pb and close < open
+
+// SHORT : SuperTrend flip bear (logique V12)
+macro_short_ok = not use_ema200_short or close < ema200
 
 // ══════════════════════════════════════════════════════════════════════════════
 // FILTRES
@@ -113,15 +113,12 @@ if ta.change(dayofmonth(time)) != 0
 can_trade = day_trades < max_daily
 no_pos = strategy.position_size == 0
 
-// Filtre macro pour shorts : prix doit être sous EMA200
-short_macro_ok = not short_strict or close < ema200
-
 // ══════════════════════════════════════════════════════════════════════════════
 // SIGNAUX FINAUX
 // ══════════════════════════════════════════════════════════════════════════════
 
-long_signal  = allow_long  and trend_up   and pb_long  and in_session and can_trade and no_pos
-short_signal = allow_short and trend_down and pb_short and short_macro_ok and in_session and can_trade and no_pos
+long_signal  = allow_long  and trend_up and pb_long and in_session and can_trade and no_pos
+short_signal = allow_short and st_flip_bear and macro_short_ok and in_session and can_trade and no_pos
 
 // ══════════════════════════════════════════════════════════════════════════════
 // GESTION DES ORDRES
@@ -134,20 +131,24 @@ var float short_entry_price = na
 var bool  long_be_reached   = false
 var bool  short_be_reached  = false
 
-// Fermer sur flip SuperTrend (protection)
-if st_bear and strategy.position_size > 0
+// Fermer long sur flip SuperTrend bear (protection)
+if st_flip_bear and strategy.position_size > 0
     strategy.close("L", comment="ST Flip ▼")
     trail_long := na
     long_be_reached := false
 
-if st_bull and strategy.position_size < 0
+// Fermer short sur flip SuperTrend bull
+if st_flip_bull and strategy.position_size < 0
     strategy.close("S", comment="ST Flip ▲")
     trail_short := na
     short_be_reached := false
 
-// --- LONG ---
+// ══════════════════════════════════════════════════════════════════════════════
+// LONG — Pullback + Trailing (logique V11)
+// ══════════════════════════════════════════════════════════════════════════════
+
 if long_signal
-    float sl   = close - atr_val * sl_atr_mult
+    float sl   = close - atr_val * long_sl_mult
     float risk = close - sl
     if risk > 0
         day_trades += 1
@@ -156,12 +157,33 @@ if long_signal
         long_entry_price := close
         long_be_reached  := false
         strategy.entry("L", strategy.long)
-        if not use_trail
-            strategy.exit("L_exit", "L", stop=sl, limit=close + risk * tp_rr)
+        if not long_trail
+            strategy.exit("L_exit", "L", stop=sl, limit=close + risk * long_tp_rr)
 
-// --- SHORT ---
+// Long Breakeven
+if strategy.position_size > 0 and long_use_be and not na(long_entry_price)
+    float long_profit = (close - long_entry_price) / long_entry_price * 100
+    if long_profit >= long_be_pct
+        long_be_reached := true
+    if long_be_reached and close <= long_entry_price
+        strategy.close("L", comment="BE Stop L")
+        trail_long := na
+        long_be_reached := false
+
+// Long Trailing
+if long_trail and strategy.position_size > 0 and not na(trail_long)
+    float floor_l = long_be_reached and not na(long_entry_price) ? long_entry_price : trail_long
+    trail_long := math.max(floor_l, close - atr_val * long_trail_m)
+    if close <= trail_long
+        strategy.close("L", comment="Trail L")
+        trail_long := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SHORT — SuperTrend flip + 3 modes (logique V12)
+// ══════════════════════════════════════════════════════════════════════════════
+
 if short_signal
-    float sl   = close + atr_val * sl_atr_mult
+    float sl   = close + atr_val * short_sl_mult
     float risk = sl - close
     if risk > 0
         day_trades += 1
@@ -170,43 +192,31 @@ if short_signal
         short_entry_price := close
         short_be_reached  := false
         strategy.entry("S", strategy.short)
-        if not use_trail
-            strategy.exit("S_exit", "S", stop=sl, limit=close - risk * tp_rr)
 
-// --- Breakeven Long ---
-if strategy.position_size > 0 and use_be and not na(long_entry_price)
-    float long_profit = (close - long_entry_price) / long_entry_price * 100
-    if long_profit >= be_pct
-        long_be_reached := true
-    if long_be_reached and close <= long_entry_price
-        strategy.close("L", comment="BE Stop")
-        trail_long := na
-        long_be_reached := false
+        if short_mode == "Fixed TP"
+            strategy.exit("S_tp", "S", stop=sl, limit=close - risk * short_tp_rr)
+        else if short_mode == "Trailing"
+            nop = 0
+        else
+            // ST Flip mode : SL seulement, sortie sur flip SuperTrend
+            strategy.exit("S_sl", "S", stop=sl)
 
-// --- Breakeven Short ---
-if strategy.position_size < 0 and use_be and not na(short_entry_price)
+// Short Breakeven
+if strategy.position_size < 0 and short_use_be and not na(short_entry_price)
     float short_profit = (short_entry_price - close) / short_entry_price * 100
-    if short_profit >= be_pct
+    if short_profit >= short_be_pct
         short_be_reached := true
     if short_be_reached and close >= short_entry_price
-        strategy.close("S", comment="BE Stop")
+        strategy.close("S", comment="BE Stop S")
         trail_short := na
         short_be_reached := false
 
-// --- Trailing Long ---
-if use_trail and strategy.position_size > 0 and not na(trail_long)
-    float floor_l = long_be_reached and not na(long_entry_price) ? long_entry_price : trail_long
-    trail_long := math.max(floor_l, close - atr_val * trail_mult)
-    if close <= trail_long
-        strategy.close("L", comment="Trail")
-        trail_long := na
-
-// --- Trailing Short ---
-if use_trail and strategy.position_size < 0 and not na(trail_short)
+// Short Trailing (si mode = Trailing)
+if short_mode == "Trailing" and strategy.position_size < 0 and not na(trail_short)
     float ceil_s = short_be_reached and not na(short_entry_price) ? short_entry_price : trail_short
-    trail_short := math.min(ceil_s, close + atr_val * trail_mult)
+    trail_short := math.min(ceil_s, close + atr_val * short_trail_m)
     if close >= trail_short
-        strategy.close("S", comment="Trail")
+        strategy.close("S", comment="Trail S")
         trail_short := na
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -219,10 +229,10 @@ plot(ema_s,   "EMA 50",  color.new(color.orange, 30),  linewidth=2)
 plot(ema200,  "EMA 200", color.new(color.white, 40),   linewidth=2)
 plot(ema_pb,  "EMA PB",  color.new(color.yellow, 50),  linewidth=1)
 
-plot(strategy.position_size > 0 and use_trail ? trail_long  : na, "Trail L", color.new(color.lime, 30), linewidth=1, style=plot.style_stepline)
-plot(strategy.position_size < 0 and use_trail ? trail_short : na, "Trail S", color.new(color.fuchsia, 30), linewidth=1, style=plot.style_stepline)
+plot(strategy.position_size > 0 and long_trail ? trail_long : na, "Trail L", color.new(color.lime, 30), linewidth=1, style=plot.style_stepline)
+plot(strategy.position_size < 0 and short_mode == "Trailing" ? trail_short : na, "Trail S", color.new(color.fuchsia, 30), linewidth=1, style=plot.style_stepline)
 
-bgcolor(trend_up ? color.new(color.green, 94) : trend_down ? color.new(color.red, 94) : color.new(color.gray, 97))
+bgcolor(st_bull ? color.new(color.green, 95) : color.new(color.red, 95))
 
 plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=#00FF88, text="▲ L")
 plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=#FF4444, text="▼ S")
@@ -232,11 +242,11 @@ plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.t
 // ══════════════════════════════════════════════════════════════════════════════
 
 if barstate.islast
-    var table d = table.new(position=position.top_right, rows=7, columns=2,
+    var table d = table.new(position=position.top_right, rows=8, columns=2,
          bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
 
     table.cell(d, 0, 0, "PE V11", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 0, "Smart Dir", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "Hybrid", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
 
     st_txt = st_bull ? "BULL ▲" : "BEAR ▼"
     table.cell(d, 0, 1, "SuperTrend", text_color=color.white, text_size=size.small)
@@ -253,19 +263,20 @@ if barstate.islast
     table.cell(d, 0, 4, "Mode", text_color=color.white, text_size=size.small)
     table.cell(d, 1, 4, mode_txt, text_color=color.aqua, text_size=size.small)
 
-    dir_txt = trend_up ? "▲ ACHAT" : trend_down ? "▼ VENTE" : "— NEUTRE"
-    dir_col = trend_up ? color.green : trend_down ? color.red : color.gray
-    table.cell(d, 0, 5, "Trend", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 5, dir_txt, text_color=dir_col, text_size=size.small, bgcolor=color.new(dir_col, 85))
+    table.cell(d, 0, 5, "Long Mode", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, long_trail ? "Pullback + Trail" : "Pullback + TP", text_color=color.lime, text_size=size.small)
+
+    table.cell(d, 0, 6, "Short Mode", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, short_mode, text_color=color.fuchsia, text_size=size.small)
 
     pos_txt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
     pos_col = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
-    table.cell(d, 0, 6, "Position", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, pos_txt, text_color=pos_col, text_size=size.small)
+    table.cell(d, 0, 7, "Position", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, pos_txt, text_color=pos_col, text_size=size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ALERTES
 // ══════════════════════════════════════════════════════════════════════════════
 
-alertcondition(long_signal,  title="V11 LONG",  message="PE V11 LONG — Trend up + Pullback | {{close}}")
-alertcondition(short_signal, title="V11 SHORT", message="PE V11 SHORT — Trend down + Pullback | {{close}}")
+alertcondition(long_signal,  title="V11 LONG",  message="PE V11 LONG — Pullback | {{close}}")
+alertcondition(short_signal, title="V11 SHORT", message="PE V11 SHORT — ST Flip | {{close}}")
