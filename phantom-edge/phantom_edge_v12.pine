@@ -51,6 +51,9 @@ short_trail_m   = input.float(3.5,  "Short Trail (x ATR)",     step=0.25, group=
      tooltip="Utilisé si mode = Trailing. Plus large que long.")
 short_tp_rr     = input.float(2.0,  "Short TP (x risque)",     step=0.25, group=grp4,
      tooltip="Utilisé si mode = Fixed TP")
+short_use_be    = input.bool(true, "Short Breakeven Stop",    group=grp4,
+     tooltip="Quand le short atteint X% de profit, le stop passe au prix d'entrée.")
+short_be_pct    = input.float(5.0, "Short BE activation (%)", step=0.5, group=grp4)
 
 grp5 = "Session"
 use_sess   = input.bool(false, "Session Filter", group=grp5)
@@ -92,13 +95,16 @@ short_signal = st_flip_bear and macro_short and in_session
 
 var float trail_long_val  = na
 var float trail_short_val = na
-var float long_entry_price = na
-var bool  long_be_reached  = false
+var float long_entry_price  = na
+var bool  long_be_reached   = false
+var float short_entry_price = na
+var bool  short_be_reached  = false
 
 // --- Fermer position opposée sur flip ---
 if st_flip_bull and strategy.position_size < 0
     strategy.close("S", comment="ST Flip ▲")
     trail_short_val := na
+    short_be_reached := false
 
 if st_flip_bear and strategy.position_size > 0
     strategy.close("L", comment="ST Flip ▼")
@@ -148,8 +154,10 @@ if short_signal
     float sl   = close + atr_val * short_sl_mult
     float risk = sl - close
     if risk > 0
-        trail_short_val := sl
-        trail_long_val  := na
+        trail_short_val  := sl
+        trail_long_val   := na
+        short_entry_price := close
+        short_be_reached  := false
         strategy.entry("S", strategy.short)
 
         if short_mode == "Fixed TP"
@@ -161,9 +169,20 @@ if short_signal
             // ST Flip mode : SL seulement, sortie sur flip SuperTrend
             strategy.exit("S_sl", "S", stop=sl)
 
-// Short trailing (si mode = Trailing)
+// ── Short Breakeven Stop ──
+if strategy.position_size < 0 and short_use_be and not na(short_entry_price)
+    float short_profit = (short_entry_price - close) / short_entry_price * 100
+    if short_profit >= short_be_pct
+        short_be_reached := true
+    if short_be_reached and close >= short_entry_price
+        strategy.close("S", comment="BE Stop S")
+        trail_short_val := na
+        short_be_reached := false
+
+// ── Short Trailing (si mode = Trailing) ──
 if short_mode == "Trailing" and strategy.position_size < 0 and not na(trail_short_val)
-    trail_short_val := math.min(trail_short_val, close + atr_val * short_trail_m)
+    float trail_ceil = short_be_reached and not na(short_entry_price) ? short_entry_price : trail_short_val
+    trail_short_val := math.min(trail_ceil, close + atr_val * short_trail_m)
     if close >= trail_short_val
         strategy.close("S", comment="Trail S")
         trail_short_val := na
