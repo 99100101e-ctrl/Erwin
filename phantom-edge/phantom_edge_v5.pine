@@ -27,12 +27,12 @@ htf_ema_slow = input.int(200, "HTF EMA Slow", minval=50, group=grp1)
 grp2 = "Pullback Entry (15m)"
 ema_entry = input.int(21, "EMA Pullback (15m)", minval=5, group=grp2)
 ema_trend  = input.int(50, "EMA Trend (15m)", minval=20, group=grp2)
-pullback_atr = input.float(0.5, "Max Pullback Distance (x ATR)", step=0.1, group=grp2)
+pullback_pct = input.float(0.3, "Pullback Zone EMA21 (%)", step=0.05, group=grp2)
 
 grp3 = "Confirmation"
-require_engulf = input.bool(true, "Require Engulfing Candle", group=grp3)
-min_body_pct   = input.float(0.4, "Min Candle Body Ratio", step=0.05, group=grp3)
-vol_factor     = input.float(1.2, "Min Volume vs MA", step=0.1, group=grp3)
+require_engulf = input.bool(false, "Require Engulfing Candle", group=grp3)
+min_body_pct   = input.float(0.3, "Min Candle Body Ratio", step=0.05, group=grp3)
+vol_factor     = input.float(1.0, "Min Volume vs MA", step=0.1, group=grp3)
 
 grp4 = "Risk Management"
 atr_len       = input.int(14, "ATR Period", group=grp4)
@@ -73,17 +73,14 @@ ema21  = ta.ema(close, ema_entry)
 ema50  = ta.ema(close, ema_trend)
 ema200 = ta.ema(close, 200)
 
-// Prix au-dessus de ses EMAs (structure bullish 15m)
-local_bull = close > ema50 and ema50 > ema200
-local_bear = close < ema50 and ema50 < ema200
+// Structure EMA alignée (utiliser les EMAs, pas le prix)
+local_bull = ema21 > ema50 and ema50 > ema200  // EMAs haussières
+local_bear = ema21 < ema50 and ema50 < ema200  // EMAs baissières
 
-// Distance du prix à l'EMA 21
-dist_to_ema = math.abs(close - ema21)
-near_ema21  = dist_to_ema <= atr_val * pullback_atr
-
-// Pullback: prix revient sur EMA 21 sans la casser
-pullback_bull = near_ema21 and low <= ema21 * 1.001 and close >= ema21 and local_bull
-pullback_bear = near_ema21 and high >= ema21 * 0.999 and close <= ema21 and local_bear
+// Pullback: prix dans la zone EMA 21 (± pullback_pct%)
+zone = ema21 * pullback_pct / 100
+pullback_bull = local_bull and low <= ema21 + zone and close >= ema21 - zone
+pullback_bear = local_bear and high >= ema21 - zone and close <= ema21 + zone
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MODULE 3 : CONFIRMATION DE BOUGIE (Engulfing / Force)
@@ -109,8 +106,8 @@ candle_confirm_bear = strong_candle and (not require_engulf or engulf_bear)
 // ══════════════════════════════════════════════════════════════════════════════
 
 rsi_val = ta.rsi(close, 14)
-rsi_ok_bull = rsi_val > 40 and rsi_val < 70  // ni oversold ni overbought pour longs
-rsi_ok_bear = rsi_val > 30 and rsi_val < 60  // idem pour shorts
+rsi_ok_bull = rsi_val > 35 and rsi_val < 75  // zone haussière saine
+rsi_ok_bear = rsi_val > 25 and rsi_val < 65  // zone baissière saine
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SESSION + DAILY LIMIT
@@ -134,10 +131,13 @@ long_signal = htf_bull and pullback_bull and candle_confirm_bull and rsi_ok_bull
 short_signal = htf_bear and pullback_bear and candle_confirm_bear and rsi_ok_bear and volume > vol_ma * vol_factor and in_session and can_trade and strategy.position_size == 0
 
 // ══════════════════════════════════════════════════════════════════════════════
-// GESTION DES ORDRES AVEC TRAILING STOP
+// GESTION DES ORDRES — TRAILING STOP MANUEL
 // ══════════════════════════════════════════════════════════════════════════════
 
-trail_offset = atr_val * trail_atr
+var float entry_sl_long  = na
+var float entry_sl_short = na
+var float trail_sl_long  = na
+var float trail_sl_short = na
 
 if long_signal
     float sl = close - atr_val * sl_atr
@@ -145,10 +145,11 @@ if long_signal
     if risk > 0
         float tp = close + risk * tp_rr
         day_trades += 1
+        entry_sl_long  := sl
+        trail_sl_long  := sl
+        trail_sl_short := na
         strategy.entry("L", strategy.long)
-        if use_trail
-            strategy.exit("L_exit", "L", stop=sl, trail_offset=trail_offset * syminfo.mintick * 0, trail_points=trail_offset / syminfo.mintick)
-        else
+        if not use_trail
             strategy.exit("L_exit", "L", stop=sl, limit=tp)
 
 if short_signal
@@ -157,11 +158,27 @@ if short_signal
     if risk > 0
         float tp = close - risk * tp_rr
         day_trades += 1
+        entry_sl_short := sl
+        trail_sl_short := sl
+        trail_sl_long  := na
         strategy.entry("S", strategy.short)
-        if use_trail
-            strategy.exit("S_exit", "S", stop=sl, trail_offset=trail_offset * syminfo.mintick * 0, trail_points=trail_offset / syminfo.mintick)
-        else
+        if not use_trail
             strategy.exit("S_exit", "S", stop=sl, limit=tp)
+
+// Mise à jour du trailing stop manuel
+if use_trail and strategy.position_size > 0
+    float new_trail = close - atr_val * trail_atr
+    trail_sl_long := math.max(trail_sl_long, new_trail)
+    if close < trail_sl_long
+        strategy.close("L", comment="Trail")
+        trail_sl_long := na
+
+if use_trail and strategy.position_size < 0
+    float new_trail = close + atr_val * trail_atr
+    trail_sl_short := math.min(trail_sl_short, new_trail)
+    if close > trail_sl_short
+        strategy.close("S", comment="Trail")
+        trail_sl_short := na
 
 // ══════════════════════════════════════════════════════════════════════════════
 // AFFICHAGE
