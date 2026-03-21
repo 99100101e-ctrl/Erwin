@@ -1,0 +1,496 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE — Microstructure + Fractal Regime Day Trading               ║
+// ║  © Erwin 2026 — Stratégie originale introuvable                           ║
+// ║                                                                            ║
+// ║  Combinaison inédite :                                                     ║
+// ║  1. Fair Value Gaps (FVG) → zones de déséquilibre prix                    ║
+// ║  2. Order Blocks → empreinte institutionnelle                              ║
+// ║  3. Hurst Exponent → régime trending vs mean-reverting                    ║
+// ║  4. Volume Absorption → accumulation/distribution cachée                  ║
+// ║  5. Liquidity Sweep → faux breakouts (piège retail)                       ║
+// ║                                                                            ║
+// ║  Timeframe : 15m | Instrument : BTCUSDT                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 1. PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp_fvg = "Fair Value Gaps"
+fvg_min_size   = input.float(0.15, "FVG taille min (% prix)", step=0.05, group=grp_fvg)
+fvg_max_age    = input.int(50, "FVG durée max (bougies)", minval=10, group=grp_fvg)
+
+grp_ob = "Order Blocks"
+ob_lookback    = input.int(15, "OB lookback", minval=5, group=grp_ob)
+ob_body_ratio  = input.float(0.6, "OB body/range min", step=0.1, group=grp_ob)
+
+grp_hurst = "Hurst Exponent"
+hurst_len      = input.int(100, "Hurst période", minval=30, group=grp_hurst)
+hurst_trending = input.float(0.55, "Hurst seuil trend (>)", step=0.01, group=grp_hurst)
+hurst_mr       = input.float(0.45, "Hurst seuil MR (<)", step=0.01, group=grp_hurst)
+
+grp_abs = "Volume Absorption"
+abs_vol_mult   = input.float(1.8, "Absorption vol min (x MA)", step=0.1, group=grp_abs)
+abs_body_max   = input.float(0.3, "Absorption body/range max", step=0.05, group=grp_abs)
+vol_ma_len     = input.int(20, "Volume MA", minval=5, group=grp_abs)
+
+grp_liq = "Liquidity Sweep"
+liq_lookback   = input.int(20, "Sweep lookback", minval=5, group=grp_liq)
+liq_wick_min   = input.float(0.6, "Sweep wick/range min", step=0.05, group=grp_liq)
+
+grp_risk = "Gestion du Risque"
+atr_len        = input.int(14, "ATR période", group=grp_risk)
+sl_type        = input.string("Structure", "SL Type", options=["Structure", "ATR"], group=grp_risk)
+sl_atr_mult    = input.float(1.5, "SL si ATR (x ATR)", step=0.1, group=grp_risk)
+tp1_rr         = input.float(2.0, "TP1 (x Risk)", step=0.1, group=grp_risk)
+tp2_rr         = input.float(4.0, "TP2 (x Risk)", step=0.1, group=grp_risk)
+use_trail      = input.bool(true, "Trailing Stop", group=grp_risk)
+trail_act      = input.float(2.0, "Trail activation (x Risk)", step=0.1, group=grp_risk)
+trail_off      = input.float(1.0, "Trail offset (x Risk)", step=0.1, group=grp_risk)
+max_daily       = input.int(3, "Max trades/jour", minval=1, group=grp_risk)
+
+grp_sess = "Sessions"
+use_session    = input.bool(true, "Filtre Session", group=grp_sess)
+sess_lo_start  = input.int(7,  "London Open",  group=grp_sess)
+sess_lo_end    = input.int(10, "London Close",  group=grp_sess)
+sess_ny_start  = input.int(13, "NY Open",       group=grp_sess)
+sess_ny_end    = input.int(16, "NY Close",      group=grp_sess)
+
+grp_disp = "Affichage"
+show_fvg       = input.bool(true,  "FVG zones",     group=grp_disp)
+show_ob        = input.bool(true,  "Order Blocks",  group=grp_disp)
+show_sweep     = input.bool(true,  "Sweep signals", group=grp_disp)
+show_absorb    = input.bool(true,  "Absorption",    group=grp_disp)
+show_hurst     = input.bool(true,  "Hurst panel",   group=grp_disp)
+show_dash      = input.bool(true,  "Dashboard",     group=grp_disp)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2. HURST EXPONENT — Régime fractal
+//    H > 0.55 → trending (momentum)
+//    H < 0.45 → mean reverting (fade moves)
+//    0.45-0.55 → random walk (no trade)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Simplified Hurst via Rescaled Range (R/S) method
+hurst_calc(src, length) =>
+    // Calculate returns
+    float sum_rs = 0.0
+    float sum_log_n = 0.0
+    float sum_log_rs = 0.0
+    float sum_log_n2 = 0.0
+    float sum_cross = 0.0
+    int count = 0
+
+    // Use multiple sub-periods to estimate H
+    for div = 2 to 5
+        int sub_len = length / div
+        if sub_len >= 10
+            float total_rs = 0.0
+            int num_subs = 0
+
+            for s = 0 to div - 1
+                int start_idx = s * sub_len
+                // Mean of sub-period
+                float sub_mean = 0.0
+                for k = 0 to sub_len - 1
+                    sub_mean += nz(src[start_idx + k])
+                sub_mean /= sub_len
+
+                // Cumulative deviation and range
+                float cum_dev = 0.0
+                float max_dev = 0.0
+                float min_dev = 0.0
+                float sum_sq = 0.0
+                for k = 0 to sub_len - 1
+                    float val = nz(src[start_idx + k]) - sub_mean
+                    cum_dev += val
+                    max_dev := math.max(max_dev, cum_dev)
+                    min_dev := math.min(min_dev, cum_dev)
+                    sum_sq += val * val
+
+                float range_val = max_dev - min_dev
+                float std_dev = math.sqrt(sum_sq / sub_len)
+
+                if std_dev > 0
+                    total_rs += range_val / std_dev
+                    num_subs += 1
+
+            if num_subs > 0
+                float avg_rs = total_rs / num_subs
+                if avg_rs > 0
+                    float ln = math.log(sub_len)
+                    float lr = math.log(avg_rs)
+                    sum_log_n += ln
+                    sum_log_rs += lr
+                    sum_log_n2 += ln * ln
+                    sum_cross += ln * lr
+                    count += 1
+
+    // Linear regression slope = Hurst exponent
+    float h = 0.5
+    if count >= 2
+        float denom = count * sum_log_n2 - sum_log_n * sum_log_n
+        if denom != 0
+            h := (count * sum_cross - sum_log_n * sum_log_rs) / denom
+    math.max(0.0, math.min(1.0, h))
+
+// Log returns for Hurst
+log_ret = math.log(close / close[1])
+hurst_val = hurst_calc(log_ret, hurst_len)
+
+is_trending  = hurst_val > hurst_trending
+is_mr        = hurst_val < hurst_mr
+is_random    = not is_trending and not is_mr
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3. FAIR VALUE GAPS (FVG)
+//    Bullish FVG: candle[2].high < candle[0].low (gap haussier)
+//    Bearish FVG: candle[2].low > candle[0].high (gap baissier)
+// ══════════════════════════════════════════════════════════════════════════════
+
+fvg_bull = low > high[2] and (low - high[2]) / close * 100 >= fvg_min_size
+fvg_bear = high < low[2] and (low[2] - high) / close * 100 >= fvg_min_size
+
+// Track active FVGs
+var float fvg_bull_top = na
+var float fvg_bull_bot = na
+var int   fvg_bull_bar = na
+var float fvg_bear_top = na
+var float fvg_bear_bot = na
+var int   fvg_bear_bar = na
+
+if fvg_bull
+    fvg_bull_top := low
+    fvg_bull_bot := high[2]
+    fvg_bull_bar := bar_index
+
+if fvg_bear
+    fvg_bear_top := low[2]
+    fvg_bear_bot := high
+    fvg_bear_bar := bar_index
+
+// FVG still valid?
+fvg_bull_active = not na(fvg_bull_bar) and bar_index - fvg_bull_bar <= fvg_max_age and low > fvg_bull_bot
+fvg_bear_active = not na(fvg_bear_bar) and bar_index - fvg_bear_bar <= fvg_max_age and high < fvg_bear_top
+
+// Price entering FVG zone (retest)
+price_in_bull_fvg = fvg_bull_active and low <= fvg_bull_top and close > fvg_bull_bot
+price_in_bear_fvg = fvg_bear_active and high >= fvg_bear_bot and close < fvg_bear_top
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 4. ORDER BLOCKS
+//    Bullish OB: last bearish candle before bullish impulse
+//    Bearish OB: last bullish candle before bearish impulse
+// ══════════════════════════════════════════════════════════════════════════════
+
+is_bearish_candle = close < open
+is_bullish_candle = close > open
+body_range = math.abs(close - open) / (high - low + 0.0001)
+
+// Bullish impulse: strong up move breaking recent high
+impulse_up = close > ta.highest(high, ob_lookback)[1] and body_range > ob_body_ratio
+impulse_dn = close < ta.lowest(low, ob_lookback)[1] and body_range > ob_body_ratio
+
+// Find last opposing candle before impulse
+var float ob_bull_top = na
+var float ob_bull_bot = na
+var float ob_bear_top = na
+var float ob_bear_bot = na
+
+if impulse_up
+    // Look back for last bearish candle
+    for i = 1 to ob_lookback
+        if close[i] < open[i]
+            ob_bull_top := open[i]
+            ob_bull_bot := close[i]
+            break
+
+if impulse_dn
+    for i = 1 to ob_lookback
+        if close[i] > open[i]
+            ob_bear_top := close[i]
+            ob_bear_bot := open[i]
+            break
+
+// Price at order block
+price_at_bull_ob = not na(ob_bull_bot) and low <= ob_bull_top and close > ob_bull_bot
+price_at_bear_ob = not na(ob_bear_top) and high >= ob_bear_bot and close < ob_bear_top
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 5. VOLUME ABSORPTION
+//    Gros volume + petit corps = absorption (institutions accumulent)
+// ══════════════════════════════════════════════════════════════════════════════
+
+vol_ma_val = ta.sma(volume, vol_ma_len)
+atr_val    = ta.atr(atr_len)
+
+high_vol = volume > vol_ma_val * abs_vol_mult
+small_body = body_range < abs_body_max
+
+absorption = high_vol and small_body
+
+// Bullish absorption: near lows with big volume, small body
+bull_absorption = absorption and close > open and low <= ta.lowest(low, 10)[1] * 1.002
+// Bearish absorption: near highs with big volume, small body
+bear_absorption = absorption and close < open and high >= ta.highest(high, 10)[1] * 0.998
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 6. LIQUIDITY SWEEP (Faux Breakout)
+//    Prix casse un niveau → longue mèche → ferme à l'intérieur
+//    = les stops ont été chassés, le vrai mouvement arrive
+// ══════════════════════════════════════════════════════════════════════════════
+
+recent_high = ta.highest(high, liq_lookback)[1]
+recent_low  = ta.lowest(low, liq_lookback)[1]
+
+candle_range = high - low
+upper_wick = high - math.max(open, close)
+lower_wick = math.min(open, close) - low
+
+// Sweep des lows: prix casse le low → longue mèche basse → ferme au-dessus
+sweep_lows = low < recent_low and close > recent_low and
+     lower_wick / (candle_range + 0.0001) >= liq_wick_min and
+     close > open
+
+// Sweep des highs: prix casse le high → longue mèche haute → ferme en-dessous
+sweep_highs = high > recent_high and close < recent_high and
+     upper_wick / (candle_range + 0.0001) >= liq_wick_min and
+     close < open
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 7. SESSION FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+london_open = hr >= sess_lo_start and hr < sess_lo_end
+ny_open     = hr >= sess_ny_start and hr < sess_ny_end
+in_session  = not use_session or london_open or ny_open
+
+// Daily trade counter
+var int day_trades = 0
+if ta.change(dayofmonth(time))
+    day_trades := 0
+can_trade = day_trades < max_daily
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 8. SIGNAUX COMPOSITES — La magie de Phantom Edge
+//
+//    LONG nécessite :
+//    a) Hurst trending  → FVG retest OU Order Block + Volume spike
+//    b) Hurst MR        → Liquidity sweep lows + Absorption
+//    c) Bonus: FVG + OB confluence = signal "Phantom" (plus fort)
+//
+//    SHORT = miroir inverse
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- TRENDING REGIME (Hurst > 0.55) ---
+// Logique: suivre le momentum, entrer sur FVG retest ou OB
+
+// Long trending: FVG bull retest OU Order Block bull + volume
+trend_long = is_trending and (
+     (price_in_bull_fvg and volume > vol_ma_val) or
+     (price_at_bull_ob and volume > vol_ma_val * 1.2)
+ )
+
+trend_short = is_trending and (
+     (price_in_bear_fvg and volume > vol_ma_val) or
+     (price_at_bear_ob and volume > vol_ma_val * 1.2)
+ )
+
+// --- MEAN REVERSION REGIME (Hurst < 0.45) ---
+// Logique: fader les mouvements, entrer sur liquidity sweep + absorption
+
+mr_long = is_mr and sweep_lows and (bull_absorption or bull_absorption[1] or bull_absorption[2])
+mr_short = is_mr and sweep_highs and (bear_absorption or bear_absorption[1] or bear_absorption[2])
+
+// --- PHANTOM SIGNAL (confluence maximale) ---
+// FVG + OB au même endroit = zone institutionnelle forte
+phantom_long  = price_in_bull_fvg and price_at_bull_ob and volume > vol_ma_val
+phantom_short = price_in_bear_fvg and price_at_bear_ob and volume > vol_ma_val
+
+// === Signaux finaux ===
+long_signal  = (trend_long or mr_long or phantom_long) and in_session and can_trade and strategy.position_size == 0
+short_signal = (trend_short or mr_short or phantom_short) and in_session and can_trade and strategy.position_size == 0
+
+// Signal type pour adapter le risque
+var string sig_type = ""
+if long_signal or short_signal
+    if phantom_long or phantom_short
+        sig_type := "PHANTOM"
+    else if trend_long or trend_short
+        sig_type := "TREND"
+    else
+        sig_type := "SWEEP"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 9. GESTION DES ORDRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal
+    float sl = na
+    if sl_type == "Structure"
+        // SL sous le FVG bot ou OB bot ou sweep low
+        float struct_low = na
+        if price_in_bull_fvg
+            struct_low := fvg_bull_bot
+        if price_at_bull_ob
+            struct_low := na(struct_low) ? ob_bull_bot : math.min(struct_low, ob_bull_bot)
+        if sweep_lows
+            struct_low := na(struct_low) ? low : math.min(struct_low, low)
+        sl := nz(struct_low, close - atr_val * sl_atr_mult) - atr_val * 0.2
+    else
+        sl := close - atr_val * sl_atr_mult
+
+    float risk = close - sl
+    if risk > 0 and risk < atr_val * 4
+        float tp1 = close + risk * tp1_rr
+        float tp2 = close + risk * tp2_rr
+        day_trades += 1
+        strategy.entry("L", strategy.long)
+        strategy.exit("L_exit", "L", stop=sl, limit=tp2,
+             trail_points=use_trail ? risk * trail_act / syminfo.mintick : na,
+             trail_offset=use_trail ? risk * trail_off / syminfo.mintick : na)
+
+if short_signal
+    float sl = na
+    if sl_type == "Structure"
+        float struct_high = na
+        if price_in_bear_fvg
+            struct_high := fvg_bear_top
+        if price_at_bear_ob
+            struct_high := na(struct_high) ? ob_bear_top : math.max(struct_high, ob_bear_top)
+        if sweep_highs
+            struct_high := na(struct_high) ? high : math.max(struct_high, high)
+        sl := nz(struct_high, close + atr_val * sl_atr_mult) + atr_val * 0.2
+    else
+        sl := close + atr_val * sl_atr_mult
+
+    float risk = sl - close
+    if risk > 0 and risk < atr_val * 4
+        float tp1 = close - risk * tp1_rr
+        float tp2 = close - risk * tp2_rr
+        day_trades += 1
+        strategy.entry("S", strategy.short)
+        strategy.exit("S_exit", "S", stop=sl, limit=tp2,
+             trail_points=use_trail ? risk * trail_act / syminfo.mintick : na,
+             trail_offset=use_trail ? risk * trail_off / syminfo.mintick : na)
+
+// Fermer sur signal opposé
+if short_signal and strategy.position_size > 0
+    strategy.close("L", comment="Reverse")
+if long_signal and strategy.position_size < 0
+    strategy.close("S", comment="Reverse")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 10. AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// FVG zones
+var box fvg_bull_box = na
+var box fvg_bear_box = na
+if show_fvg and fvg_bull
+    fvg_bull_box := box.new(bar_index - 2, fvg_bull_top, bar_index + 15, fvg_bull_bot,
+         border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 85))
+if show_fvg and fvg_bear
+    fvg_bear_box := box.new(bar_index - 2, fvg_bear_top, bar_index + 15, fvg_bear_bot,
+         border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 85))
+
+// Order Blocks
+var box ob_bull_box = na
+var box ob_bear_box = na
+if show_ob and impulse_up and not na(ob_bull_bot)
+    ob_bull_box := box.new(bar_index - ob_lookback, ob_bull_top, bar_index + 20, ob_bull_bot,
+         border_color=color.new(color.teal, 40), bgcolor=color.new(color.teal, 88), border_style=line.style_dashed)
+if show_ob and impulse_dn and not na(ob_bear_top)
+    ob_bear_box := box.new(bar_index - ob_lookback, ob_bear_top, bar_index + 20, ob_bear_bot,
+         border_color=color.new(color.maroon, 40), bgcolor=color.new(color.maroon, 88), border_style=line.style_dashed)
+
+// Signals
+plotshape(show_sweep and sweep_lows,  title="Sweep Low",  location=location.belowbar, style=shape.diamond, size=size.tiny, color=color.new(color.lime, 20), text="SW")
+plotshape(show_sweep and sweep_highs, title="Sweep High", location=location.abovebar, style=shape.diamond, size=size.tiny, color=color.new(color.red, 20),  text="SW")
+
+plotshape(show_absorb and bull_absorption, title="Bull Abs", location=location.belowbar, style=shape.circle, size=size.tiny, color=color.new(color.blue, 20), text="A")
+plotshape(show_absorb and bear_absorption, title="Bear Abs", location=location.abovebar, style=shape.circle, size=size.tiny, color=color.new(color.purple, 20), text="A")
+
+// Entry signals
+plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.normal, color=color.new(#00FF88, 0), text="PE↑")
+plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.new(#FF4444, 0), text="PE↓")
+
+// Hurst regime background
+bgcolor(show_hurst and is_trending ? color.new(color.blue, 93) :
+     show_hurst and is_mr ? color.new(color.purple, 93) : na, title="Hurst Regime")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 11. DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if show_dash and barstate.islast
+    var table d = table.new(position.top_right, 2, 10, bgcolor=color.new(#1a1a2e, 5), border_width=1, border_color=#333355)
+
+    table.cell(d, 0, 0, "PHANTOM", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
+    table.cell(d, 1, 0, "EDGE", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
+
+    // Hurst
+    h_txt = is_trending ? "TREND" : is_mr ? "MEAN REV" : "RANDOM"
+    h_col = is_trending ? color.blue : is_mr ? color.purple : color.gray
+    table.cell(d, 0, 1, "Hurst", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, str.tostring(hurst_val, "#.###") + " " + h_txt, text_color=h_col, text_size=size.small)
+
+    // FVG
+    fvg_txt = fvg_bull_active ? "BULL ✓" : fvg_bear_active ? "BEAR ✓" : "—"
+    fvg_col = fvg_bull_active ? color.green : fvg_bear_active ? color.red : color.gray
+    table.cell(d, 0, 2, "FVG", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, fvg_txt, text_color=fvg_col, text_size=size.small)
+
+    // OB
+    ob_txt = price_at_bull_ob ? "BULL ✓" : price_at_bear_ob ? "BEAR ✓" : "—"
+    ob_col = price_at_bull_ob ? color.green : price_at_bear_ob ? color.red : color.gray
+    table.cell(d, 0, 3, "Order Block", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, ob_txt, text_color=ob_col, text_size=size.small)
+
+    // Absorption
+    abs_txt = bull_absorption ? "BULL ✓" : bear_absorption ? "BEAR ✓" : "—"
+    abs_col = bull_absorption ? color.green : bear_absorption ? color.red : color.gray
+    table.cell(d, 0, 4, "Absorption", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, abs_txt, text_color=abs_col, text_size=size.small)
+
+    // Sweep
+    sw_txt = sweep_lows ? "LOWS ✓" : sweep_highs ? "HIGHS ✓" : "—"
+    sw_col = sweep_lows ? color.green : sweep_highs ? color.red : color.gray
+    table.cell(d, 0, 5, "Sweep", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, sw_txt, text_color=sw_col, text_size=size.small)
+
+    // Volume
+    v_col = volume > vol_ma_val * abs_vol_mult ? color.green : color.gray
+    table.cell(d, 0, 6, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, str.tostring(volume / vol_ma_val, "#.#") + "x MA", text_color=v_col, text_size=size.small)
+
+    // ATR
+    table.cell(d, 0, 7, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, str.tostring(atr_val, "#.0"), text_color=color.white, text_size=size.small)
+
+    // Session
+    s_txt = london_open ? "LONDON" : ny_open ? "NEW YORK" : "OFF"
+    s_col = in_session ? color.green : color.red
+    table.cell(d, 0, 8, "Session", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 8, s_txt, text_color=s_col, text_size=size.small)
+
+    // Trades
+    table.cell(d, 0, 9, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 9, str.tostring(day_trades) + "/" + str.tostring(max_daily), text_color=day_trades >= max_daily ? color.red : color.white, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 12. ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal,  title="PE LONG",  message="PHANTOM EDGE LONG {{close}} | " + sig_type)
+alertcondition(short_signal, title="PE SHORT", message="PHANTOM EDGE SHORT {{close}} | " + sig_type)
+alertcondition(phantom_long or phantom_short, title="PHANTOM",  message="⚡ PHANTOM CONFLUENCE {{close}}")
+alertcondition(sweep_lows or sweep_highs,     title="SWEEP",    message="Liquidity Sweep detected {{close}}")
+alertcondition(bull_absorption or bear_absorption, title="ABSORB", message="Volume Absorption {{close}}")
