@@ -1,24 +1,21 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM SHORT V6 — Trend Following (Short)                               ║
+// ║  PHANTOM SHORT V7 — Fixed Position Size & Volatility                      ║
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
-// ║  V1-V5 : trop de filtres, timing impossible, margin calls                 ║
+// ║  V6 : le timing était BON (EMA cross capture les baisses)                 ║
+// ║  MAIS : 100% equity + SL 8% = margin calls systématiques                 ║
 // ║                                                                            ║
-// ║  V6 : SIMPLE. Suivre la tendance baissière, pas la prédire.               ║
-// ║                                                                            ║
-// ║  ENTRÉE : EMA rapide croise sous EMA lente → short                        ║
-// ║  SORTIE : prix clôture au-dessus de l'EMA rapide → close                 ║
-// ║                                                                            ║
-// ║  Pas de TP fixe. Pas de SL serré. On RIDE le trend.                       ║
-// ║  Un trade peut durer des semaines si le trend continue.                    ║
-// ║                                                                            ║
-// ║  Objectif : capturer les -40% à -50% moves, accepter les petites pertes  ║
-// ║  sur les faux signaux.                                                     ║
+// ║  V7 corrections :                                                          ║
+// ║  1. Position 30% equity (pas 100% → survit aux rebonds 10-15%)           ║
+// ║  2. SL 15% (BTC bouge de 10% facilement en bear market rally)            ║
+// ║  3. Filtre ADX : ne shorter que quand il y a un vrai TREND                ║
+// ║     (évite les faux signaux dans les ranges)                              ║
+// ║  4. Sortie toujours sur EMA cross retour                                  ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
-strategy("Phantom Short V6 — Trend Ride", overlay=true,
-     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+strategy("Phantom Short V7 — Trend Ride", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=30,
      commission_type=strategy.commission.percent, commission_value=0.075,
      slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
 
@@ -30,30 +27,25 @@ grp1 = "Trend EMAs"
 ema_fast_len  = input.int(21,   "EMA rapide",  group=grp1)
 ema_slow_len  = input.int(50,   "EMA lente",   group=grp1)
 
-grp2 = "Entrée"
-entry_mode    = input.string("EMA Cross", "Mode d'entrée",
-     options=["EMA Cross", "EMA Cross + Close sous EMA lente"], group=grp2,
-     tooltip="EMA Cross = entrée dès que EMA rapide croise sous lente\nAvec close = confirmation supplémentaire")
+grp2 = "Filtre ADX — éviter les ranges"
+use_adx       = input.bool(true,  "Filtre ADX actif", group=grp2,
+     tooltip="ADX mesure la FORCE du trend. Évite de shorter dans les zones choppy/range.")
+adx_len       = input.int(14,    "ADX Period",   group=grp2)
+adx_min       = input.float(20,  "ADX minimum",  step=1.0, group=grp2,
+     tooltip="ADX > 20 = trend en cours. ADX < 20 = range/chop → pas de trade")
 
-grp3 = "Sortie — LAISSER COURIR"
+grp3 = "Sortie"
 exit_mode     = input.string("Close au-dessus EMA rapide", "Mode de sortie",
-     options=["Close au-dessus EMA rapide", "Close au-dessus EMA lente", "EMA re-cross haussier"], group=grp3,
-     tooltip="Quand sortir du short. EMA rapide = plus réactif, EMA lente = reste plus longtemps")
-exit_bars     = input.int(2, "Barres consécutives au-dessus pour sortir", group=grp3, minval=1,
-     tooltip="Évite les fausses sorties — le prix doit rester au-dessus X barres")
+     options=["Close au-dessus EMA rapide", "Close au-dessus EMA lente", "EMA re-cross haussier"], group=grp3)
+exit_bars     = input.int(2, "Barres consécutives au-dessus pour sortir", group=grp3, minval=1)
 
-grp4 = "Stop Loss de sécurité"
+grp4 = "Stop Loss — LARGE"
 use_sl        = input.bool(true, "Stop Loss de sécurité", group=grp4)
-sl_pct        = input.float(8.0, "SL (% au-dessus de l'entrée)", step=0.5, group=grp4,
-     tooltip="SL large en pourcentage pour absorber la volatilité. 8% = raisonnable pour BTC daily")
+sl_pct        = input.float(15.0, "SL (% au-dessus de l'entrée)", step=0.5, group=grp4,
+     tooltip="15% = large. Avec 30% de position, un SL touché = -4.5% de l'equity. Acceptable.")
 
-grp5 = "Filtre anti-bull"
-use_ema200    = input.bool(false, "Prix doit être sous EMA 200", group=grp5,
-     tooltip="Filtre optionnel — désactivé par défaut pour ne pas rater les débuts de baisse")
-ema200_len    = input.int(200, "EMA 200 Period", group=grp5)
-
-grp6 = "Anti-overtrading"
-min_bars_between = input.int(10, "Min barres entre trades", group=grp6)
+grp5 = "Anti-overtrading"
+min_bars_between = input.int(10, "Min barres entre trades", group=grp5)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // INDICATEURS
@@ -61,28 +53,26 @@ min_bars_between = input.int(10, "Min barres entre trades", group=grp6)
 
 ema_fast = ta.ema(close, ema_fast_len)
 ema_slow = ta.ema(close, ema_slow_len)
-ema_200  = ta.ema(close, ema200_len)
+
+// ADX
+[di_plus, di_minus, adx_val] = ta.dmi(adx_len, adx_len)
 
 // Cross détection
 bearish_cross = ta.crossunder(ema_fast, ema_slow)
 bullish_cross = ta.crossover(ema_fast, ema_slow)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SIGNAL D'ENTRÉE — SIMPLE
+// SIGNAL D'ENTRÉE
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Mode 1 : juste le cross
-entry_cross = bearish_cross
+// EMA cross baissier
+entry_signal = bearish_cross
 
-// Mode 2 : cross + prix sous EMA lente (confirmation)
-entry_confirmed = bearish_cross and close < ema_slow
+// ADX : trend assez fort
+cond_adx = not use_adx or adx_val >= adx_min
 
-entry_signal = switch entry_mode
-    "EMA Cross" => entry_cross
-    "EMA Cross + Close sous EMA lente" => entry_confirmed
-
-// Filtre EMA 200 optionnel
-cond_ema200 = not use_ema200 or close < ema_200
+// DI- doit être au-dessus de DI+ (confirmation baissière)
+cond_di = not use_adx or di_minus > di_plus
 
 // Cooldown
 var int bars_since_trade = 999
@@ -91,20 +81,18 @@ cooldown_ok = bars_since_trade >= min_bars_between
 no_pos = strategy.position_size == 0
 
 // Signal final
-short_signal = entry_signal and cond_ema200 and cooldown_ok and no_pos
+short_signal = entry_signal and cond_adx and cond_di and cooldown_ok and no_pos
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SIGNAL DE SORTIE — LAISSER COURIR
+// SIGNAL DE SORTIE
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Compter les barres consécutives au-dessus de l'EMA de sortie
 var int bars_above_exit = 0
-
 exit_ema = exit_mode == "Close au-dessus EMA lente" ? ema_slow : ema_fast
 
 if exit_mode == "EMA re-cross haussier"
     if bullish_cross
-        bars_above_exit := exit_bars  // sortie immédiate sur re-cross
+        bars_above_exit := exit_bars
     else
         bars_above_exit := 0
 else
@@ -126,12 +114,10 @@ if short_signal
     entry_price := close
     strategy.entry("S", strategy.short)
 
-    // SL de sécurité uniquement (pas de TP — on laisse courir)
     if use_sl
         float sl_level = close * (1 + sl_pct / 100)
         strategy.exit("S_sl", "S", stop=sl_level)
 
-// Sortie sur signal
 if exit_signal
     strategy.close("S", comment="Trend Exit")
 
@@ -139,14 +125,15 @@ if exit_signal
 // AFFICHAGE
 // ══════════════════════════════════════════════════════════════════════════════
 
-// EMAs
 col_fast = ema_fast < ema_slow ? color.red : color.green
 plot(ema_fast, "EMA Fast", col_fast, linewidth=2)
 plot(ema_slow, "EMA Slow", color.new(color.aqua, 20), linewidth=2)
-plot(use_ema200 ? ema_200 : na, "EMA 200", color.new(color.white, 40), linewidth=1)
 
-// Zone short active (EMA rapide sous lente)
+// Zone short active
 bgcolor(ema_fast < ema_slow ? color.new(color.red, 93) : na, title="Bearish Zone")
+
+// ADX trop faible (zone choppy — pas de trade)
+bgcolor(ema_fast < ema_slow and use_adx and adx_val < adx_min ? color.new(color.yellow, 90) : na, title="Low ADX (Choppy)")
 
 // Signaux
 plotshape(short_signal, title="SHORT", location=location.abovebar,
@@ -154,11 +141,9 @@ plotshape(short_signal, title="SHORT", location=location.abovebar,
 plotshape(exit_signal, title="EXIT", location=location.belowbar,
      style=shape.triangleup, size=size.normal, color=#44FF44, text="EXIT")
 
-// Cross markers
-plotshape(bearish_cross and not short_signal, title="Bear Cross", location=location.abovebar,
-     style=shape.xcross, size=size.small, color=color.new(color.red, 30))
-plotshape(bullish_cross, title="Bull Cross", location=location.belowbar,
-     style=shape.xcross, size=size.small, color=color.new(color.green, 30))
+// Cross non pris (filtré par ADX)
+plotshape(bearish_cross and not short_signal and no_pos, title="Filtered Cross", location=location.abovebar,
+     style=shape.xcross, size=size.small, color=color.new(color.orange, 30))
 
 // PnL en cours
 var label pnl_label = na
@@ -174,45 +159,50 @@ if strategy.position_size < 0 and not na(entry_price)
 // ══════════════════════════════════════════════════════════════════════════════
 
 if barstate.islast
-    var table d = table.new(position=position.top_right, rows=7, columns=2,
+    var table d = table.new(position=position.top_right, rows=8, columns=2,
          bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
 
     table.cell(d, 0, 0, "PHANTOM", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 0, "SHORT V6", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "SHORT V7", bgcolor=color.new(#990000, 10), text_color=color.white, text_size=size.small)
 
     // Trend
     trend_txt = ema_fast < ema_slow ? "BEARISH" : "BULLISH"
     table.cell(d, 0, 1, "Trend", text_color=color.white, text_size=size.small)
     table.cell(d, 1, 1, trend_txt, text_color=ema_fast < ema_slow ? color.red : color.green, text_size=size.small)
 
+    // ADX
+    adx_col = adx_val >= adx_min ? color.green : color.orange
+    table.cell(d, 0, 2, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, str.tostring(adx_val, "#.0") + (adx_val >= adx_min ? " TREND" : " CHOP"), text_color=adx_col, text_size=size.small)
+
+    // DI
+    table.cell(d, 0, 3, "DI-/DI+", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, str.tostring(di_minus, "#.0") + "/" + str.tostring(di_plus, "#.0"), text_color=di_minus > di_plus ? color.red : color.green, text_size=size.small)
+
     // Position
     if strategy.position_size < 0 and not na(entry_price)
         pnl = (entry_price - close) / entry_price * 100
-        table.cell(d, 0, 2, "Position", text_color=color.white, text_size=size.small)
-        table.cell(d, 1, 2, "SHORT " + str.tostring(pnl, "#.1") + "%", text_color=pnl > 0 ? color.green : color.red, text_size=size.small)
+        table.cell(d, 0, 4, "Position", text_color=color.white, text_size=size.small)
+        table.cell(d, 1, 4, "SHORT " + str.tostring(pnl, "#.1") + "%", text_color=pnl > 0 ? color.green : color.red, text_size=size.small)
     else
-        table.cell(d, 0, 2, "Position", text_color=color.white, text_size=size.small)
-        table.cell(d, 1, 2, "FLAT", text_color=color.gray, text_size=size.small)
+        table.cell(d, 0, 4, "Position", text_color=color.white, text_size=size.small)
+        table.cell(d, 1, 4, "FLAT", text_color=color.gray, text_size=size.small)
 
-    // Entry price
-    table.cell(d, 0, 3, "Entry", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 3, strategy.position_size < 0 ? str.tostring(entry_price, "#") : "—", text_color=color.white, text_size=size.small)
+    // Size
+    table.cell(d, 0, 5, "Taille", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, "30% equity", text_color=color.white, text_size=size.small)
 
     // SL
-    table.cell(d, 0, 4, "SL", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 4, use_sl ? str.tostring(sl_pct, "#.0") + "%" : "OFF", text_color=use_sl ? color.orange : color.gray, text_size=size.small)
+    table.cell(d, 0, 6, "SL", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, use_sl ? str.tostring(sl_pct, "#.0") + "% (= " + str.tostring(sl_pct * 0.3, "#.1") + "% equity)" : "OFF", text_color=use_sl ? color.orange : color.gray, text_size=size.small)
 
-    // Exit mode
-    table.cell(d, 0, 5, "Sortie", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 5, exit_mode, text_color=color.white, text_size=size.small)
-
-    // Bars above
-    table.cell(d, 0, 6, "Bars above", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, str.tostring(bars_above_exit) + "/" + str.tostring(exit_bars), text_color=bars_above_exit > 0 ? color.orange : color.gray, text_size=size.small)
+    // Exit
+    table.cell(d, 0, 7, "Sortie", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, str.tostring(bars_above_exit) + "/" + str.tostring(exit_bars) + " bars", text_color=bars_above_exit > 0 ? color.orange : color.gray, text_size=size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ALERTES
 // ══════════════════════════════════════════════════════════════════════════════
 
-alertcondition(short_signal, title="V6 SHORT", message="PHANTOM SHORT V6 — Trend short | {{close}}")
-alertcondition(exit_signal, title="V6 EXIT", message="PHANTOM SHORT V6 — Trend exit | {{close}}")
+alertcondition(short_signal, title="V7 SHORT", message="PHANTOM SHORT V7 — Trend short | {{close}}")
+alertcondition(exit_signal, title="V7 EXIT", message="PHANTOM SHORT V7 — Trend exit | {{close}}")
