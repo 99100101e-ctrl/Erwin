@@ -1,15 +1,13 @@
 """
-BTC Autonomous Scanner — Reproduit la logique V3 (Structure + Multi-Timeframe)
-sans TradingView. Utilise l'API Binance (gratuite, sans clé).
+Phantom Edge V11 — Autonomous Scanner
+Reproduit la logique phantom_edge_v11.pine sans TradingView.
+Utilise l'API Binance (gratuite, sans clé).
 
-Logique identique au Pine Script btc_daytrading_v3.pine :
-  - Biais HTF : EMA 50 sur 4H
-  - Consolidation + Breakout
-  - Pivot S/R + Bounce
-  - RSI + Volume spike
-  - Filtre session (London/NY/Overlap)
-  - Max trades/jour
-  - SL/TP basés sur la structure
+Logique identique au Pine Script :
+  LONGS (4H + Daily) : SuperTrend bull + EMA 21>50 + pullback EMA 21 + bougie haussière
+    → SL = ATR x 2, trailing ATR x 2, breakeven à +5%
+  SHORTS (Daily only) : EMA 21/50 bearish cross + ADX ≥ 20 + DI- > DI+
+    → Breakeven +5%, time stop 15 bars, trailing 10%/12%, EMA re-cross exit
 
 Usage:
   cp .env.example .env   # remplir TELEGRAM_TOKEN + TELEGRAM_CHAT_ID
@@ -19,8 +17,10 @@ Usage:
 
 import os
 import time
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -35,27 +35,43 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
 SYMBOL = "BTCUSDT"
-LTF = "15m"       # timeframe d'entrée
-HTF = "4h"        # timeframe biais
+STATE_FILE = Path(__file__).parent / "scanner_state.json"
 
-# Paramètres identiques au Pine V3
-EMA_HTF_LEN = 50
-LOOKBACK = 20
-BREAKOUT_MULT = 0.5
-CONSOL_BARS = 8
-CONSOL_WIDTH = 1.5
-RSI_LEN = 14
-VOL_MULT = 1.3
-VOL_MA_LEN = 20
+# ── Paramètres identiques au Pine V11 ──
+# SuperTrend
+ST_FACTOR = 3.0
+ST_PERIOD = 10
+
+# EMAs
+EMA_FAST_LEN = 21
+EMA_SLOW_LEN = 50
+EMA_MACRO_LEN = 200
+EMA_PB_LEN = 21
+PB_ZONE_PCT = 0.5
+
+# Long risk
 ATR_LEN = 14
-SL_BUFFER = 0.3
-TP1_RR = 1.5
-TP2_RR = 3.0
-MAX_TRADES_DAY = 3
-PIVOT_LEN = 10
+LONG_SL_MULT = 2.0
+LONG_TRAIL_MULT = 2.0
+LONG_TP_RR = 3.0
+LONG_BE_PCT = 5.0
 
-# Intervalle de scan (secondes) — toutes les 60s
-SCAN_INTERVAL = 60
+# Short ADX
+SHORT_ADX_LEN = 14
+SHORT_ADX_MIN = 20.0
+
+# Short protection
+SHORT_BE_PCT = 5.0
+SHORT_TIME_BARS = 15
+SHORT_TRAIL_ACT = 10.0
+SHORT_TRAIL_PCT = 12.0
+SHORT_MIN_BARS = 10
+
+# Session
+MAX_DAILY = 3
+
+# Scan toutes les 5 minutes (les bougies 4H changent lentement)
+SCAN_INTERVAL = 300
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,7 +81,7 @@ logging.basicConfig(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BINANCE API (gratuite, sans clé)
+# BINANCE API
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_klines(symbol: str, interval: str, limit: int = 200) -> np.ndarray:
@@ -75,10 +91,9 @@ def fetch_klines(symbol: str, interval: str, limit: int = 200) -> np.ndarray:
         "symbol": symbol,
         "interval": interval,
         "limit": limit,
-    }, timeout=10)
+    }, timeout=15)
     resp.raise_for_status()
     data = resp.json()
-    # [open_time, open, high, low, close, volume, ...]
     arr = np.array([
         [float(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])]
         for k in data
@@ -92,7 +107,7 @@ def fetch_klines(symbol: str, interval: str, limit: int = 200) -> np.ndarray:
 
 def ema(src: np.ndarray, length: int) -> np.ndarray:
     """Exponential Moving Average."""
-    result = np.full_like(src, np.nan)
+    result = np.full_like(src, np.nan, dtype=float)
     k = 2.0 / (length + 1)
     result[0] = src[0]
     for i in range(1, len(src)):
@@ -100,267 +115,340 @@ def ema(src: np.ndarray, length: int) -> np.ndarray:
     return result
 
 
-def sma(src: np.ndarray, length: int) -> np.ndarray:
-    """Simple Moving Average."""
-    result = np.full_like(src, np.nan)
-    for i in range(length - 1, len(src)):
-        result[i] = np.mean(src[i - length + 1:i + 1])
-    return result
-
-
-def rsi(src: np.ndarray, length: int) -> np.ndarray:
-    """Relative Strength Index."""
-    result = np.full_like(src, np.nan)
-    deltas = np.diff(src)
-    gains = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
-
-    avg_gain = np.mean(gains[:length])
-    avg_loss = np.mean(losses[:length])
-
-    for i in range(length, len(deltas)):
-        avg_gain = (avg_gain * (length - 1) + gains[i]) / length
-        avg_loss = (avg_loss * (length - 1) + losses[i]) / length
-        if avg_loss == 0:
-            result[i + 1] = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            result[i + 1] = 100.0 - 100.0 / (1.0 + rs)
-
+def rma(src: np.ndarray, length: int) -> np.ndarray:
+    """Wilder's smoothing (RMA) — alpha = 1/length."""
+    result = np.full_like(src, np.nan, dtype=float)
+    result[length - 1] = np.mean(src[:length])
+    k = 1.0 / length
+    for i in range(length, len(src)):
+        result[i] = src[i] * k + result[i - 1] * (1 - k)
     return result
 
 
 def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, length: int) -> np.ndarray:
-    """Average True Range."""
-    tr = np.maximum(high[1:] - low[1:],
-                    np.maximum(np.abs(high[1:] - close[:-1]),
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[high[0] - low[0]], tr])
-    # RMA (Wilder's smoothing = EMA with alpha=1/length)
-    result = np.full_like(tr, np.nan)
-    result[length - 1] = np.mean(tr[:length])
-    k = 1.0 / length
-    for i in range(length, len(tr)):
-        result[i] = tr[i] * k + result[i - 1] * (1 - k)
-    return result
+    """Average True Range (Wilder's RMA)."""
+    tr = np.empty(len(high))
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(high)):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
+    return rma(tr, length)
 
 
-def highest(src: np.ndarray, length: int) -> np.ndarray:
-    """Rolling highest."""
-    result = np.full_like(src, np.nan)
-    for i in range(length - 1, len(src)):
-        result[i] = np.max(src[i - length + 1:i + 1])
-    return result
+def supertrend(high: np.ndarray, low: np.ndarray, close: np.ndarray,
+               factor: float, period: int):
+    """SuperTrend. Retourne (st_value, st_dir) — dir<0 = bull, dir>0 = bear."""
+    atr_vals = atr(high, low, close, period)
+    hl2 = (high + low) / 2.0
+    n = len(close)
+
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    st_dir = np.zeros(n)
+    st_value = np.full(n, np.nan)
+
+    for i in range(n):
+        if np.isnan(atr_vals[i]):
+            continue
+        up = hl2[i] + factor * atr_vals[i]
+        dn = hl2[i] - factor * atr_vals[i]
+
+        if i == 0 or np.isnan(upper_band[i - 1]):
+            upper_band[i] = up
+            lower_band[i] = dn
+            st_dir[i] = -1 if close[i] > up else 1
+        else:
+            lower_band[i] = max(dn, lower_band[i - 1]) if close[i - 1] > lower_band[i - 1] else dn
+            upper_band[i] = min(up, upper_band[i - 1]) if close[i - 1] < upper_band[i - 1] else up
+
+            prev_dir = st_dir[i - 1]
+            if prev_dir < 0:  # was bull
+                if close[i] < lower_band[i]:
+                    st_dir[i] = 1  # flip bear
+                else:
+                    st_dir[i] = -1
+            else:  # was bear
+                if close[i] > upper_band[i]:
+                    st_dir[i] = -1  # flip bull
+                else:
+                    st_dir[i] = 1
+
+        st_value[i] = lower_band[i] if st_dir[i] < 0 else upper_band[i]
+
+    return st_value, st_dir
 
 
-def lowest(src: np.ndarray, length: int) -> np.ndarray:
-    """Rolling lowest."""
-    result = np.full_like(src, np.nan)
-    for i in range(length - 1, len(src)):
-        result[i] = np.min(src[i - length + 1:i + 1])
-    return result
+def dmi(high: np.ndarray, low: np.ndarray, close: np.ndarray, length: int):
+    """Directional Movement Index. Retourne (di_plus, di_minus, adx)."""
+    n = len(high)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
 
+    for i in range(1, n):
+        up_move = high[i] - high[i - 1]
+        dn_move = low[i - 1] - low[i]
+        plus_dm[i] = up_move if (up_move > dn_move and up_move > 0) else 0
+        minus_dm[i] = dn_move if (dn_move > up_move and dn_move > 0) else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
 
-def pivot_high(high: np.ndarray, left: int, right: int) -> np.ndarray:
-    """Détecte les pivot highs (confirmés après 'right' barres)."""
-    result = np.full_like(high, np.nan)
-    for i in range(left, len(high) - right):
-        val = high[i]
-        if all(high[j] < val for j in range(i - left, i)) and \
-           all(high[j] < val for j in range(i + 1, i + right + 1)):
-            result[i + right] = val  # confirmé 'right' barres plus tard
-    return result
+    tr[0] = high[0] - low[0]
+    smoothed_tr = rma(tr, length)
+    smoothed_plus = rma(plus_dm, length)
+    smoothed_minus = rma(minus_dm, length)
 
+    di_plus = np.where(smoothed_tr > 0, 100 * smoothed_plus / smoothed_tr, 0)
+    di_minus = np.where(smoothed_tr > 0, 100 * smoothed_minus / smoothed_tr, 0)
 
-def pivot_low(low: np.ndarray, left: int, right: int) -> np.ndarray:
-    """Détecte les pivot lows (confirmés après 'right' barres)."""
-    result = np.full_like(low, np.nan)
-    for i in range(left, len(low) - right):
-        val = low[i]
-        if all(low[j] > val for j in range(i - left, i)) and \
-           all(low[j] > val for j in range(i + 1, i + right + 1)):
-            result[i + right] = val
-    return result
+    dx = np.where((di_plus + di_minus) > 0,
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = rma(dx, length)
+
+    return di_plus, di_minus, adx
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STRATÉGIE V3
+# ÉTAT PERSISTANT (position, trailing, etc.)
 # ══════════════════════════════════════════════════════════════════════════════
 
-class SignalResult:
+class ScannerState:
+    """État persistant du scanner — sauvé en JSON entre les scans."""
+
     def __init__(self):
-        self.direction: Optional[str] = None  # "LONG" ou "SHORT"
-        self.signal_type: Optional[str] = None  # "Breakout" ou "S/R Bounce"
-        self.entry: float = 0
-        self.sl: float = 0
-        self.tp1: float = 0
-        self.tp2: float = 0
-        self.risk: float = 0
-        self.rsi: float = 0
-        self.htf_bias: str = ""
-        self.consolidation: bool = False
+        # Position
+        self.position: str = "FLAT"  # "FLAT", "LONG", "SHORT"
+        self.entry_price: float = 0
+        self.entry_time: str = ""
+
+        # Long management
+        self.trail_long: float = 0
+        self.long_be_reached: bool = False
+
+        # Short management
+        self.short_lowest: float = 0
+        self.short_be_reached: bool = False
+        self.short_trail_active: bool = False
+        self.short_bars_in: int = 0
+        self.short_bars_since: int = 999
+
+        # Daily counter
+        self.day_trades: int = 0
+        self.last_day: int = 0
+
+        # Dedup
+        self.last_signal_time: float = 0
+
+    def save(self):
+        STATE_FILE.write_text(json.dumps(self.__dict__, indent=2))
+
+    @classmethod
+    def load(cls) -> "ScannerState":
+        state = cls()
+        if STATE_FILE.exists():
+            data = json.loads(STATE_FILE.read_text())
+            for k, v in data.items():
+                if hasattr(state, k):
+                    setattr(state, k, v)
+        return state
 
 
-def analyze(ltf_klines: np.ndarray, htf_klines: np.ndarray) -> Optional[SignalResult]:
-    """Analyse les données et retourne un signal si détecté."""
-    # ── HTF : Biais directionnel ──
-    htf_close = htf_klines[:, 4]
-    ema_htf = ema(htf_close, EMA_HTF_LEN)
+# ══════════════════════════════════════════════════════════════════════════════
+# ANALYSE — Phantom Edge V11
+# ══════════════════════════════════════════════════════════════════════════════
 
-    bias_bull = htf_close[-1] > ema_htf[-1]
-    bias_bear = htf_close[-1] < ema_htf[-1]
+class Signal:
+    def __init__(self, direction: str, timeframe: str, entry: float,
+                 sl: float = 0, tp: float = 0, adx: float = 0,
+                 st_dir: str = "", ema_align: str = ""):
+        self.direction = direction
+        self.timeframe = timeframe
+        self.entry = entry
+        self.sl = sl
+        self.tp = tp
+        self.adx = adx
+        self.st_dir = st_dir
+        self.ema_align = ema_align
 
-    # ── LTF : Indicateurs ──
-    close = ltf_klines[:, 4]
-    high_ = ltf_klines[:, 2]
-    low_ = ltf_klines[:, 3]
-    vol = ltf_klines[:, 5]
 
-    rsi_val = rsi(close, RSI_LEN)
+def check_long(klines: np.ndarray, tf_label: str) -> Optional[Signal]:
+    """Détecte un signal LONG sur les données fournies (4H ou 1D)."""
+    close = klines[:, 4]
+    high_ = klines[:, 2]
+    low_ = klines[:, 3]
+    open_ = klines[:, 1]
+
+    # Indicateurs
+    st_val, st_dir = supertrend(high_, low_, close, ST_FACTOR, ST_PERIOD)
+    ema_f = ema(close, EMA_FAST_LEN)
+    ema_s = ema(close, EMA_SLOW_LEN)
+    ema_pb = ema(close, EMA_PB_LEN)
     atr_val = atr(high_, low_, close, ATR_LEN)
-    vol_ma = sma(vol, VOL_MA_LEN)
 
-    i = -1  # dernière bougie complète = avant-dernière (la dernière est en cours)
-    # On utilise -2 pour la dernière bougie fermée
+    # Dernière bougie fermée
     idx = -2
 
-    if np.isnan(atr_val[idx]) or np.isnan(rsi_val[idx]) or np.isnan(vol_ma[idx]):
+    if any(np.isnan(x[idx]) for x in [st_val, ema_f, ema_s, ema_pb, atr_val]):
         return None
 
-    cur_close = close[idx]
-    cur_high = high_[idx]
-    cur_low = low_[idx]
-    cur_rsi = rsi_val[idx]
-    cur_atr = atr_val[idx]
-    cur_vol = vol[idx]
-    cur_vol_ma = vol_ma[idx]
+    # Conditions (identiques au Pine)
+    st_bull = st_dir[idx] < 0
+    ema_bull = ema_f[idx] > ema_s[idx]
+    trend_up = st_bull and ema_bull
 
-    # ── Consolidation ──
-    range_h = highest(high_, LOOKBACK)
-    range_l = lowest(low_, LOOKBACK)
+    pb_zone = ema_pb[idx] * PB_ZONE_PCT / 100
+    pb_long = (low_[idx] <= ema_pb[idx] + pb_zone and
+               close[idx] > ema_pb[idx] and
+               close[idx] > open_[idx])
 
-    if np.isnan(range_h[idx]) or np.isnan(range_l[idx]):
+    if trend_up and pb_long:
+        sl = close[idx] - atr_val[idx] * LONG_SL_MULT
+        risk = close[idx] - sl
+        if risk > 0:
+            tp = close[idx] + risk * LONG_TP_RR
+            return Signal(
+                direction="LONG",
+                timeframe=tf_label,
+                entry=close[idx],
+                sl=sl,
+                tp=tp,
+                st_dir="BULL",
+                ema_align="21 > 50",
+            )
+    return None
+
+
+def check_short(klines_daily: np.ndarray) -> Optional[Signal]:
+    """Détecte un signal SHORT sur daily uniquement."""
+    close = klines_daily[:, 4]
+    high_ = klines_daily[:, 2]
+    low_ = klines_daily[:, 3]
+
+    ema_f = ema(close, EMA_FAST_LEN)
+    ema_s = ema(close, EMA_SLOW_LEN)
+    di_plus, di_minus, adx_val = dmi(high_, low_, close, SHORT_ADX_LEN)
+
+    idx = -2
+
+    if any(np.isnan(x[idx]) for x in [ema_f, ema_s, adx_val]):
         return None
 
-    range_width = range_h[idx] - range_l[idx]
+    # EMA 21/50 bearish cross : ema_f passe sous ema_s
+    bearish_cross = ema_f[idx] < ema_s[idx] and ema_f[idx - 1] >= ema_s[idx - 1]
 
-    # Vérifier consolidation sur les N dernières barres
-    narrow_count = 0
-    for j in range(CONSOL_BARS):
-        k = idx - j
-        if k < LOOKBACK:
-            break
-        rw = range_h[k] - range_l[k]
-        if rw < CONSOL_WIDTH * atr_val[k]:
-            narrow_count += 1
+    # ADX + DI
+    adx_ok = adx_val[idx] >= SHORT_ADX_MIN
+    di_ok = di_minus[idx] > di_plus[idx]
 
-    in_consol = narrow_count >= CONSOL_BARS
-
-    # Consolidation à la barre précédente (pour breakout)
-    narrow_count_prev = 0
-    for j in range(CONSOL_BARS):
-        k = idx - 1 - j
-        if k < LOOKBACK:
-            break
-        rw = range_h[k] - range_l[k]
-        if not np.isnan(atr_val[k]) and rw < CONSOL_WIDTH * atr_val[k]:
-            narrow_count_prev += 1
-
-    in_consol_prev = narrow_count_prev >= CONSOL_BARS
-
-    # ── Breakout ──
-    prev_range_h = range_h[idx - 1]
-    prev_range_l = range_l[idx - 1]
-
-    breakout_up = (in_consol_prev and
-                   cur_close > prev_range_h and
-                   (cur_close - prev_range_h) > cur_atr * BREAKOUT_MULT)
-
-    breakout_dn = (in_consol_prev and
-                   cur_close < prev_range_l and
-                   (prev_range_l - cur_close) > cur_atr * BREAKOUT_MULT)
-
-    # ── Pivot S/R ──
-    ph = pivot_high(high_, PIVOT_LEN, PIVOT_LEN)
-    pl = pivot_low(low_, PIVOT_LEN, PIVOT_LEN)
-
-    sr_resist = np.nan
-    sr_support = np.nan
-    # Chercher les derniers pivots valides
-    for j in range(len(ph) - 1, -1, -1):
-        if not np.isnan(ph[j]):
-            sr_resist = ph[j]
-            break
-    for j in range(len(pl) - 1, -1, -1):
-        if not np.isnan(pl[j]):
-            sr_support = pl[j]
-            break
-
-    # ── Bounce S/R ──
-    near_support = (not np.isnan(sr_support) and
-                    cur_low <= sr_support * 1.003 and
-                    cur_close > sr_support)
-    near_resist = (not np.isnan(sr_resist) and
-                   cur_high >= sr_resist * 0.997 and
-                   cur_close < sr_resist)
-
-    # ── Volume ──
-    vol_spike = cur_vol > cur_vol_ma * VOL_MULT
-
-    # ── Signaux ──
-    result = SignalResult()
-    result.rsi = cur_rsi
-    result.htf_bias = "BULL" if bias_bull else "BEAR" if bias_bear else "NEUTRE"
-    result.consolidation = in_consol
-
-    # LONG
-    long_breakout = breakout_up and bias_bull and vol_spike and 50 < cur_rsi < 75
-    long_bounce = near_support and bias_bull and cur_rsi < 40 and cur_vol > cur_vol_ma
-
-    if long_breakout or long_bounce:
-        sl_level = min(prev_range_l, sr_support if not np.isnan(sr_support) else prev_range_l) - cur_atr * SL_BUFFER
-        risk = cur_close - sl_level
-        if 0 < risk < cur_atr * 3:
-            result.direction = "LONG"
-            result.signal_type = "Breakout" if long_breakout else "S/R Bounce"
-            result.entry = cur_close
-            result.sl = sl_level
-            result.tp1 = cur_close + risk * TP1_RR
-            result.tp2 = cur_close + risk * TP2_RR
-            result.risk = risk
-            return result
-
-    # SHORT
-    short_breakout = breakout_dn and bias_bear and vol_spike and 25 < cur_rsi < 50
-    short_bounce = near_resist and bias_bear and cur_rsi > 60 and cur_vol > cur_vol_ma
-
-    if short_breakout or short_bounce:
-        sl_level = max(prev_range_h, sr_resist if not np.isnan(sr_resist) else prev_range_h) + cur_atr * SL_BUFFER
-        risk = sl_level - cur_close
-        if 0 < risk < cur_atr * 3:
-            result.direction = "SHORT"
-            result.signal_type = "Breakout" if short_breakout else "S/R Bounce"
-            result.entry = cur_close
-            result.sl = sl_level
-            result.tp1 = cur_close - risk * TP1_RR
-            result.tp2 = cur_close - risk * TP2_RR
-            result.risk = risk
-            return result
-
+    if bearish_cross and adx_ok and di_ok:
+        return Signal(
+            direction="SHORT",
+            timeframe="1D",
+            entry=close[idx],
+            adx=adx_val[idx],
+            ema_align="21 < 50 (cross)",
+        )
     return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SESSION
+# GESTION DE POSITION (trailing, BE, time stop, etc.)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def in_session() -> bool:
-    """Vérifie si on est en session active (London/NY/Overlap)."""
-    hr = datetime.now(timezone.utc).hour
-    london = 8 <= hr < 12
-    ny = 13 <= hr < 17
-    overlap = 12 <= hr < 16
-    return london or ny or overlap
+def manage_long(state: ScannerState, klines_4h: np.ndarray) -> Optional[str]:
+    """Gère une position LONG ouverte. Retourne un message de sortie ou None."""
+    close = klines_4h[:, 4]
+    high_ = klines_4h[:, 2]
+    low_ = klines_4h[:, 3]
+    idx = -2
+
+    cur_close = close[idx]
+    atr_val = atr(high_, low_, close, ATR_LEN)
+    st_val, st_dir = supertrend(high_, low_, close, ST_FACTOR, ST_PERIOD)
+
+    if np.isnan(atr_val[idx]):
+        return None
+
+    # SuperTrend flip bear → fermer
+    if st_dir[idx] > 0:
+        state.position = "FLAT"
+        state.trail_long = 0
+        state.long_be_reached = False
+        pnl = (cur_close - state.entry_price) / state.entry_price * 100
+        return f"SuperTrend Flip \u25bc | PnL: {pnl:+.2f}%"
+
+    # Breakeven
+    if state.entry_price > 0:
+        profit_pct = (cur_close - state.entry_price) / state.entry_price * 100
+        if profit_pct >= LONG_BE_PCT:
+            state.long_be_reached = True
+        if state.long_be_reached and cur_close <= state.entry_price:
+            state.position = "FLAT"
+            state.trail_long = 0
+            state.long_be_reached = False
+            return "BE Stop Long | PnL: ~0%"
+
+    # Trailing
+    if state.trail_long > 0:
+        floor = state.entry_price if state.long_be_reached else state.trail_long
+        state.trail_long = max(floor, cur_close - atr_val[idx] * LONG_TRAIL_MULT)
+        if cur_close <= state.trail_long:
+            pnl = (cur_close - state.entry_price) / state.entry_price * 100
+            state.position = "FLAT"
+            state.trail_long = 0
+            state.long_be_reached = False
+            return f"Trailing Stop Long | PnL: {pnl:+.2f}%"
+
+    return None
+
+
+def manage_short(state: ScannerState, klines_daily: np.ndarray) -> Optional[str]:
+    """Gère une position SHORT ouverte. Retourne un message de sortie ou None."""
+    close = klines_daily[:, 4]
+    idx = -2
+    cur_close = close[idx]
+
+    state.short_bars_in += 1
+
+    ema_f = ema(close, EMA_FAST_LEN)
+    ema_s = ema(close, EMA_SLOW_LEN)
+
+    # EMA re-cross haussier → sortie
+    bullish_cross = ema_f[idx] > ema_s[idx] and ema_f[idx - 1] <= ema_s[idx - 1]
+    if bullish_cross:
+        pnl = (state.entry_price - cur_close) / state.entry_price * 100
+        state.position = "FLAT"
+        return f"Trend Exit Short (EMA re-cross) | PnL: {pnl:+.2f}%"
+
+    # Breakeven
+    if state.entry_price > 0:
+        profit_pct = (state.entry_price - cur_close) / state.entry_price * 100
+        if profit_pct >= SHORT_BE_PCT:
+            state.short_be_reached = True
+        if state.short_be_reached and cur_close >= state.entry_price:
+            state.position = "FLAT"
+            return "BE Stop Short | PnL: ~0%"
+
+    # Time stop
+    if state.short_bars_in >= SHORT_TIME_BARS:
+        profit_pct = (state.entry_price - cur_close) / state.entry_price * 100
+        if profit_pct <= 0:
+            state.position = "FLAT"
+            return f"Time Stop Short ({state.short_bars_in} bars) | PnL: {profit_pct:+.2f}%"
+
+    # Trailing
+    if state.short_lowest == 0 or cur_close < state.short_lowest:
+        state.short_lowest = cur_close
+    if state.entry_price > 0:
+        profit_from_low = (state.entry_price - state.short_lowest) / state.entry_price * 100
+        if profit_from_low >= SHORT_TRAIL_ACT:
+            state.short_trail_active = True
+        if state.short_trail_active:
+            trail_level = state.short_lowest * (1 + SHORT_TRAIL_PCT / 100)
+            if cur_close >= trail_level:
+                pnl = (state.entry_price - cur_close) / state.entry_price * 100
+                state.position = "FLAT"
+                return f"Trailing Exit Short | PnL: {pnl:+.2f}%"
+
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -368,7 +456,6 @@ def in_session() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def send_telegram(text: str) -> bool:
-    """Envoie un message Telegram."""
     try:
         resp = requests.post(TELEGRAM_API, json={
             "chat_id": TELEGRAM_CHAT_ID,
@@ -381,21 +468,44 @@ def send_telegram(text: str) -> bool:
         return False
 
 
-def format_alert(sig: SignalResult) -> str:
-    """Formate l'alerte en message lisible."""
-    arrow = "\U0001F7E2" if sig.direction == "LONG" else "\U0001F534"
-    rr = abs(sig.tp2 - sig.entry) / sig.risk if sig.risk > 0 else 0
-
+def format_long_alert(sig: Signal) -> str:
+    risk = sig.entry - sig.sl
+    rr = (sig.tp - sig.entry) / risk if risk > 0 else 0
     return (
-        f"{arrow} <b>{sig.direction} BTC</b> — {sig.signal_type}\n"
+        "\U0001F7E2 <b>LONG BTC</b> — Pullback\n"
         f"\n"
         f"\U0001F4CD Entry: <code>{sig.entry:,.2f}</code>\n"
-        f"\U0001F6D1 SL: <code>{sig.sl:,.2f}</code>\n"
-        f"\U0001F3AF TP1: <code>{sig.tp1:,.2f}</code> ({TP1_RR}R)\n"
-        f"\U0001F3AF TP2: <code>{sig.tp2:,.2f}</code> ({TP2_RR}R)\n"
+        f"\U0001F6D1 SL: <code>{sig.sl:,.2f}</code> (ATR x {LONG_SL_MULT})\n"
+        f"\U0001F3AF TP: <code>{sig.tp:,.2f}</code> ({LONG_TP_RR}R)\n"
         f"\n"
-        f"\U0001F4CA RSI: {sig.rsi:.1f} | Biais 4H: {sig.htf_bias}\n"
-        f"\U0001F4B0 Risk: <code>{sig.risk:,.2f}</code> | R:R = 1:{rr:.1f}\n"
+        f"\U0001F4C8 SuperTrend: {sig.st_dir} | EMA: {sig.ema_align}\n"
+        f"\U0001F4CA TF: {sig.timeframe} | R:R = 1:{rr:.1f}\n"
+        f"\U0001F6E1 Trail: ATR x {LONG_TRAIL_MULT} | BE: +{LONG_BE_PCT}%\n"
+        f"\U0000231A {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
+    )
+
+
+def format_short_alert(sig: Signal) -> str:
+    return (
+        "\U0001F534 <b>SHORT BTC</b> — EMA Cross (Daily)\n"
+        f"\n"
+        f"\U0001F4CD Entry: <code>{sig.entry:,.2f}</code>\n"
+        f"\U0001F4C9 ADX: {sig.adx:.1f} | EMA: {sig.ema_align}\n"
+        f"\n"
+        f"\U0001F6E1 BE: +{SHORT_BE_PCT}% | Time: {SHORT_TIME_BARS} bars\n"
+        f"\U0001F504 Trail: act. +{SHORT_TRAIL_ACT}%, offset {SHORT_TRAIL_PCT}%\n"
+        f"\U0001F6AA Exit: EMA re-cross haussier\n"
+        f"\U0000231A {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
+    )
+
+
+def format_exit_alert(direction: str, reason: str, entry: float) -> str:
+    arrow = "\U00002705" if "PnL: +" in reason or "PnL: ~0" in reason else "\U0000274C"
+    return (
+        f"{arrow} <b>FERMETURE {direction}</b>\n"
+        f"\n"
+        f"\U0001F4CD Entrée était: <code>{entry:,.2f}</code>\n"
+        f"\U0001F4CB Raison: {reason}\n"
         f"\U0000231A {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
     )
 
@@ -405,58 +515,112 @@ def format_alert(sig: SignalResult) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    logging.info("BTC Scanner V3 démarré — Scan toutes les %ds", SCAN_INTERVAL)
-    send_telegram("\U0001F916 <b>BTC Scanner V3 démarré</b>\nScan toutes les 60s sur Binance\nSessions: London / NY / Overlap")
+    logging.info("Phantom Edge V11 Scanner démarré — Scan toutes les %ds", SCAN_INTERVAL)
+    send_telegram(
+        "\U0001F47B <b>Phantom Edge V11 Scanner</b>\n"
+        "Scan toutes les 5 min sur Binance\n"
+        "\U0001F7E2 LONG: 4H (SuperTrend + EMA pullback)\n"
+        "\U0001F534 SHORT: Daily (EMA cross + ADX)\n"
+        "Max 3 trades/jour"
+    )
 
-    trades_today = 0
-    last_day = datetime.now(timezone.utc).day
-    last_signal_time = 0  # éviter les doublons
+    state = ScannerState.load()
 
     while True:
         try:
             now = datetime.now(timezone.utc)
 
             # Reset compteur journalier
-            if now.day != last_day:
-                trades_today = 0
-                last_day = now.day
+            if now.day != state.last_day:
+                state.day_trades = 0
+                state.last_day = now.day
                 logging.info("Nouveau jour — compteur trades reset")
 
-            # Vérifier session
-            if not in_session():
-                logging.debug("Hors session — skip")
-                time.sleep(SCAN_INTERVAL)
-                continue
+            can_trade = state.day_trades < MAX_DAILY
 
-            # Vérifier max trades
-            if trades_today >= MAX_TRADES_DAY:
-                logging.debug("Max trades atteint (%d/%d)", trades_today, MAX_TRADES_DAY)
-                time.sleep(SCAN_INTERVAL)
-                continue
+            # ── Fetch données ──
+            klines_4h = fetch_klines(SYMBOL, "4h", limit=300)
+            klines_1d = fetch_klines(SYMBOL, "1d", limit=300)
 
-            # Fetch données
-            ltf_klines = fetch_klines(SYMBOL, LTF, limit=200)
-            htf_klines = fetch_klines(SYMBOL, HTF, limit=100)
+            # ── Gestion de position existante ──
+            if state.position == "LONG":
+                exit_msg = manage_long(state, klines_4h)
+                if exit_msg:
+                    msg = format_exit_alert("LONG", exit_msg, state.entry_price)
+                    send_telegram(msg)
+                    logging.info("EXIT LONG: %s", exit_msg)
+                    state.save()
 
-            # Analyser
-            signal = analyze(ltf_klines, htf_klines)
+            elif state.position == "SHORT":
+                exit_msg = manage_short(state, klines_1d)
+                if exit_msg:
+                    msg = format_exit_alert("SHORT", exit_msg, state.entry_price)
+                    send_telegram(msg)
+                    logging.info("EXIT SHORT: %s", exit_msg)
+                    # Reset short vars
+                    state.short_lowest = 0
+                    state.short_trail_active = False
+                    state.short_be_reached = False
+                    state.short_bars_in = 0
+                    state.save()
 
-            if signal is not None:
-                # Éviter les doublons (pas 2 alertes en moins de 15 min)
-                now_ts = time.time()
-                if now_ts - last_signal_time < 900:
-                    logging.info("Signal %s détecté mais cooldown actif", signal.direction)
-                else:
-                    msg = format_alert(signal)
+            # ── Détection nouveaux signaux (uniquement si FLAT) ──
+            if state.position == "FLAT" and can_trade:
+                # Short cooldown
+                state.short_bars_since += 1
+
+                # Vérifier LONG sur 4H
+                long_sig = check_long(klines_4h, "4H")
+                if long_sig is None:
+                    # Aussi vérifier LONG sur Daily
+                    long_sig = check_long(klines_1d, "1D")
+
+                if long_sig:
+                    msg = format_long_alert(long_sig)
                     if send_telegram(msg):
-                        trades_today += 1
-                        last_signal_time = now_ts
-                        logging.info("ALERTE %s envoyée — %s @ %.2f",
-                                     signal.direction, signal.signal_type, signal.entry)
-                    else:
-                        logging.error("Échec envoi alerte")
+                        state.position = "LONG"
+                        state.entry_price = long_sig.entry
+                        state.entry_time = now.isoformat()
+                        state.trail_long = long_sig.sl
+                        state.long_be_reached = False
+                        state.day_trades += 1
+                        state.last_signal_time = time.time()
+                        logging.info("ALERTE LONG envoyée @ %.2f (%s)", long_sig.entry, long_sig.timeframe)
+                        state.save()
+
+                # Vérifier SHORT sur Daily (si pas déjà long)
+                elif state.short_bars_since >= SHORT_MIN_BARS:
+                    short_sig = check_short(klines_1d)
+                    if short_sig:
+                        msg = format_short_alert(short_sig)
+                        if send_telegram(msg):
+                            state.position = "SHORT"
+                            state.entry_price = short_sig.entry
+                            state.entry_time = now.isoformat()
+                            state.short_lowest = short_sig.entry
+                            state.short_be_reached = False
+                            state.short_trail_active = False
+                            state.short_bars_in = 0
+                            state.short_bars_since = 0
+                            state.day_trades += 1
+                            state.last_signal_time = time.time()
+                            logging.info("ALERTE SHORT envoyée @ %.2f", short_sig.entry)
+                            state.save()
+
+            # Log status
+            if state.position != "FLAT":
+                cur_price = klines_4h[-2, 4]
+                if state.position == "LONG":
+                    pnl = (cur_price - state.entry_price) / state.entry_price * 100
+                else:
+                    pnl = (state.entry_price - cur_price) / state.entry_price * 100
+                logging.info("Position: %s @ %.2f | PnL: %+.2f%% | Trail: %.2f",
+                             state.position, state.entry_price, pnl,
+                             state.trail_long if state.position == "LONG" else state.short_lowest)
             else:
-                logging.debug("Pas de signal")
+                logging.info("FLAT — Trades: %d/%d", state.day_trades, MAX_DAILY)
+
+            state.save()
 
         except requests.exceptions.RequestException as e:
             logging.warning("Erreur réseau: %s — retry dans 30s", e)
