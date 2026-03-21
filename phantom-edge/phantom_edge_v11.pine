@@ -3,9 +3,9 @@
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
 // ║  LONGS : V11 pullback (SuperTrend + EMA alignées + pullback + trail)     ║
-// ║          → Visible 4H + Daily                                             ║
+// ║          → 4H + Daily UNIQUEMENT                                          ║
 // ║  SHORTS : Phantom Short V11 (EMA 21/50 cross + ADX + BE + time stop)    ║
-// ║          → Visible DAILY uniquement (timeframe.isdaily)                   ║
+// ║          → Daily UNIQUEMENT                                               ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
@@ -19,6 +19,9 @@ strategy("Phantom Edge V11 — Unified", overlay=true,
 // ══════════════════════════════════════════════════════════════════════════════
 
 is_daily = timeframe.isdaily
+is_4h    = timeframe.period == "240"
+is_long_tf  = is_4h or is_daily    // Longs : 4H + Daily uniquement
+is_short_tf = is_daily              // Shorts : Daily uniquement
 
 // ══════════════════════════════════════════════════════════════════════════════
 // PARAMÈTRES
@@ -130,7 +133,7 @@ no_pos = strategy.position_size == 0
 // ── LONG : SuperTrend bull + EMA alignées + pullback (4H + Daily) ──
 trend_up = st_bull and ema_bull
 pb_long  = low <= ema_pb + pb_zone and close > ema_pb and close > open
-long_signal = allow_long and trend_up and pb_long and in_session and can_trade and no_pos
+long_signal = allow_long and is_long_tf and trend_up and pb_long and in_session and can_trade and no_pos
 
 // ── SHORT : EMA 21/50 bearish cross + ADX + DI (DAILY ONLY) ──
 var int short_bars_since = 999
@@ -140,7 +143,7 @@ short_cond_adx = not short_use_adx or s_adx_val >= short_adx_min
 short_cond_di  = not short_use_adx or s_di_minus > s_di_plus
 
 // ★ is_daily : les shorts ne se déclenchent JAMAIS en 4H ou autre TF
-short_signal = allow_short and is_daily and bearish_cross and short_cond_adx and short_cond_di and short_cooldown and in_session and can_trade and no_pos
+short_signal = allow_short and is_short_tf and bearish_cross and short_cond_adx and short_cond_di and short_cooldown and in_session and can_trade and no_pos
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SHORT — Sortie EMA (Phantom Short V11 — Daily only)
@@ -285,14 +288,14 @@ plot(strategy.position_size > 0 and long_trail ? trail_long : na, "Trail L", col
 
 // Zones de couleur
 bgcolor(st_bull and ema_bull ? color.new(color.green, 95) : na, title="Long Zone")
-bgcolor(is_daily and ema_f < ema_s ? color.new(color.red, 93) : na, title="Short Zone (Daily)")
+bgcolor(is_short_tf and ema_f < ema_s ? color.new(color.red, 93) : na, title="Short Zone (Daily)")
 
 // Signaux
 plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=#00FF88, text="▲ L")
 plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=#FF4444, text="▼ S")
 
 // Cross short filtré (visible en daily pour debug)
-plotshape(is_daily and bearish_cross and not short_signal and no_pos and allow_short, title="Blocked Short",
+plotshape(is_short_tf and bearish_cross and not short_signal and no_pos and allow_short, title="Blocked Short",
      location=location.abovebar, style=shape.xcross, size=size.small, color=color.new(color.orange, 30))
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -315,23 +318,27 @@ if barstate.islast
     table.cell(d, 0, 3, "EMA 21/50", text_color=color.white, text_size=size.small)
     table.cell(d, 1, 3, ema_bull ? "Bull ▲" : "Bear ▼", text_color=ema_bull ? color.green : color.red, text_size=size.small)
 
-    table.cell(d, 0, 4, "Longs", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 4, allow_long ? "ON (4H+D)" : "OFF", text_color=allow_long ? color.lime : color.gray, text_size=size.small)
+    long_status = not allow_long ? "OFF" : is_long_tf ? "ON" : "OFF (TF)"
+    long_col = not allow_long ? color.gray : is_long_tf ? color.lime : color.orange
+    table.cell(d, 0, 4, "Longs (4H+D)", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, long_status, text_color=long_col, text_size=size.small)
 
-    // Shorts : indiquer si actifs et sur quel TF
-    short_status = not allow_short ? "OFF" : is_daily ? "ON (Daily)" : "OFF (pas Daily)"
-    short_col = not allow_short ? color.gray : is_daily ? color.fuchsia : color.orange
-    table.cell(d, 0, 5, "Shorts", text_color=color.white, text_size=size.small)
+    short_status = not allow_short ? "OFF" : is_short_tf ? "ON" : "OFF (TF)"
+    short_col = not allow_short ? color.gray : is_short_tf ? color.fuchsia : color.orange
+    table.cell(d, 0, 5, "Shorts (D)", text_color=color.white, text_size=size.small)
     table.cell(d, 1, 5, short_status, text_color=short_col, text_size=size.small)
 
     // ADX (pertinent seulement en daily)
-    if is_daily
+    if is_short_tf
         table.cell(d, 0, 6, "ADX (short)", text_color=color.white, text_size=size.small)
         table.cell(d, 1, 6, str.tostring(s_adx_val, "#.0") + (s_adx_val >= short_adx_min ? " TREND" : " CHOP"),
              text_color=s_adx_val >= short_adx_min ? color.green : color.orange, text_size=size.small)
-    else
+    else if is_long_tf
         table.cell(d, 0, 6, "Mode", text_color=color.white, text_size=size.small)
         table.cell(d, 1, 6, "Long Only", text_color=color.lime, text_size=size.small)
+    else
+        table.cell(d, 0, 6, "Mode", text_color=color.white, text_size=size.small)
+        table.cell(d, 1, 6, "Inactif (TF)", text_color=color.orange, text_size=size.small)
 
     pos_txt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
     pos_col = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
