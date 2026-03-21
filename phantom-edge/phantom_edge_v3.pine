@@ -1,0 +1,172 @@
+//@version=6
+strategy("Phantom Edge V3 — Ultra Simple", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMETERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ADX Settings
+adx_period = input.int(14, "ADX Period", minval=5)
+adx_strict = input.int(30, "ADX Strict Threshold", minval=20)  // Higher = more selective
+
+// Support/Resistance
+sr_period = input.int(20, "S/R Period (bars)", minval=10)
+sr_offset = input.float(0.5, "S/R Offset (%)", step=0.1)
+
+// Risk Management
+atr_len = input.int(14, "ATR Period")
+sl_mult = input.float(1.2, "SL Multiplier (ATR)", step=0.1)
+tp_ratio = input.float(3.0, "TP/Risk Ratio", step=0.5)
+
+// Session
+use_session = input.bool(true, "Use Session Filter")
+london_open = input.int(8, "London Open (UTC)")
+london_close = input.int(12, "London Close (UTC)")
+ny_open = input.int(13, "NY Open (UTC)")
+ny_close = input.int(17, "NY Close (UTC)")
+
+// Trade Limit
+max_trades_day = input.int(1, "Max Trades Per Day", minval=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+atr_val = ta.atr(atr_len)
+[di_plus, di_minus, adx_val] = ta.dmi(adx_period, adx_period)
+vol_ma = ta.sma(volume, 20)
+
+is_trending = adx_val > adx_strict
+is_bullish_di = di_plus > di_minus
+is_bearish_di = di_minus > di_plus
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUPPORT & RESISTANCE (Simple & Reliable)
+// ══════════════════════════════════════════════════════════════════════════════
+
+recent_high = ta.highest(high, sr_period)
+recent_low = ta.lowest(low, sr_period)
+
+resistance_level = recent_high
+support_level = recent_low
+
+// Price bouncing off levels
+near_support = close >= support_level * (1 - sr_offset / 100) and close <= support_level * (1 + sr_offset / 100)
+near_resist = close >= resistance_level * (1 - sr_offset / 100) and close <= resistance_level * (1 + sr_offset / 100)
+
+price_breaks_resistance = close > resistance_level
+price_breaks_support = close < support_level
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+in_london = hr >= london_open and hr < london_close
+in_ny = hr >= ny_open and hr < ny_close
+in_session = not use_session or in_london or in_ny
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DAILY TRADE COUNTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int trades_today = 0
+if ta.change(dayofmonth(time)) != 0
+    trades_today := 0
+
+can_trade = trades_today < max_trades_day
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS (Strict & Confluent)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG: Trending + Bullish DI + Near Support + Volume + In Session
+long_signal = is_trending and is_bullish_di and near_support and volume > vol_ma and in_session and can_trade and strategy.position_size == 0
+
+// SHORT: Trending + Bearish DI + Near Resistance + Volume + In Session
+short_signal = is_trending and is_bearish_di and near_resist and volume > vol_ma and in_session and can_trade and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORDER EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal
+    float sl = close - atr_val * sl_mult
+    float risk = close - sl
+    if risk > 0 and risk < atr_val * 2
+        float tp = close + risk * tp_ratio
+        trades_today += 1
+        strategy.entry("L", strategy.long)
+        strategy.exit("L_exit", "L", stop=sl, limit=tp)
+
+if short_signal
+    float sl = close + atr_val * sl_mult
+    float risk = sl - close
+    if risk > 0 and risk < atr_val * 2
+        float tp = close - risk * tp_ratio
+        trades_today += 1
+        strategy.entry("S", strategy.short)
+        strategy.exit("S_exit", "S", stop=sl, limit=tp)
+
+// Close opposite position on reversal signal
+if short_signal and strategy.position_size > 0
+    strategy.close("L")
+if long_signal and strategy.position_size < 0
+    strategy.close("S")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Plot S/R levels
+plot(resistance_level, "Resistance", color.new(color.red, 60), linewidth=2, style=plot.style_stepline)
+plot(support_level, "Support", color.new(color.green, 60), linewidth=2, style=plot.style_stepline)
+
+// Plot entry signals
+plotshape(long_signal, title="LONG", location=location.belowbar, style=shape.triangleup, size=size.normal, color=color.new(color.green, 0), text="L")
+plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.new(color.red, 0), text="S")
+
+// Trend background
+bgcolor(is_trending ? color.new(color.blue, 93) : color.new(color.gray, 93), title="Trend")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=6, columns=2,
+         bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(#444444, 0))
+
+    table.cell(d, 0, 0, "PE V3", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
+    table.cell(d, 1, 0, "Ultra Simple", bgcolor=color.new(#FF6600, 30), text_color=color.white, text_size=size.normal)
+
+    adx_col = is_trending ? color.blue : color.gray
+    table.cell(d, 0, 1, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, str.tostring(adx_val, "#.0") + (is_trending ? " TREND" : " RANGE"), text_color=adx_col, text_size=size.small)
+
+    di_col = is_bullish_di ? color.green : color.red
+    table.cell(d, 0, 2, "DI+/DI-", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, str.tostring(di_plus, "#.0") + "/" + str.tostring(di_minus, "#.0"), text_color=di_col, text_size=size.small)
+
+    sr_txt = near_support ? "SUPPORT" : near_resist ? "RESIST" : "—"
+    sr_col = near_support ? color.green : near_resist ? color.red : color.gray
+    table.cell(d, 0, 3, "S/R", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, sr_txt, text_color=sr_col, text_size=size.small)
+
+    vol_col = volume > vol_ma ? color.green : color.gray
+    table.cell(d, 0, 4, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, str.tostring(volume / vol_ma, "#.#") + "x MA", text_color=vol_col, text_size=size.small)
+
+    table.cell(d, 0, 5, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, str.tostring(trades_today) + "/" + str.tostring(max_trades_day),
+         text_color=trades_today >= max_trades_day ? color.red : color.white, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(long_signal, title="PE V3 LONG", message="LONG {{close}}")
+alertcondition(short_signal, title="PE V3 SHORT", message="SHORT {{close}}")
