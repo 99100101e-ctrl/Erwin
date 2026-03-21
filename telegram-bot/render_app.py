@@ -1,5 +1,5 @@
 """
-Render.com Wrapper — Lance le scanner V13 en arrière-plan
+Render.com Wrapper — Lance le scanner V11 en arrière-plan
 + serveur Flask pour le health check (obligatoire sur Render free tier).
 
 Render free tier coupe les services inactifs après 15 min.
@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify
 
-# Import du scanner V13
-from btc_scanner_v13 import main as scanner_main, ScannerState, STATE_FILE
+# Import du scanner V11 (identique au Pine Script Phantom Edge V11 — Unified)
+from btc_scanner import main as scanner_main, ScannerState, STATE_FILE
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -38,7 +38,7 @@ def health():
     state = ScannerState.load()
     return jsonify({
         "status": "running",
-        "scanner": "Phantom Edge V13",
+        "scanner": "Phantom Edge V11",
         "position": state.position,
         "entry_price": state.entry_price,
         "day_trades": state.day_trades,
@@ -50,7 +50,7 @@ def health():
 def index():
     """Page d'accueil simple."""
     return jsonify({
-        "name": "Phantom Edge V13 Scanner",
+        "name": "Phantom Edge V11 Scanner",
         "endpoints": {
             "/health": "Status du scanner",
             "/position": "Position actuelle",
@@ -77,13 +77,14 @@ def position():
     if state.position == "LONG":
         info["trailing_stop"] = state.trail_long
     else:
-        info["stop_loss"] = state.short_sl
+        info["short_bars_in"] = state.short_bars_in
+        info["short_be_reached"] = state.short_be_reached
     return jsonify(info), 200
 
 
 def start_scanner():
     """Lance le scanner dans un thread daemon."""
-    logging.info("Lancement du scanner V13 en arriere-plan...")
+    logging.info("Lancement du scanner V11 en arriere-plan...")
     scanner_main()
 
 
