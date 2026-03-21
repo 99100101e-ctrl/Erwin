@@ -1,20 +1,19 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM SHORT V7 — Fixed Position Size & Volatility                      ║
+// ║  PHANTOM SHORT V8 — Trailing Stop (verrouille les gains)                  ║
 // ║  © Erwin 2026                                                              ║
 // ║                                                                            ║
-// ║  V6 : le timing était BON (EMA cross capture les baisses)                 ║
-// ║  MAIS : 100% equity + SL 8% = margin calls systématiques                 ║
+// ║  V7 : entrées/sorties correctes visuellement                              ║
+// ║  MAIS : EMA exit trop lent → trades rendent tout le profit avant sortie  ║
 // ║                                                                            ║
-// ║  V7 corrections :                                                          ║
-// ║  1. Position 30% equity (pas 100% → survit aux rebonds 10-15%)           ║
-// ║  2. SL 15% (BTC bouge de 10% facilement en bear market rally)            ║
-// ║  3. Filtre ADX : ne shorter que quand il y a un vrai TREND                ║
-// ║     (évite les faux signaux dans les ranges)                              ║
-// ║  4. Sortie toujours sur EMA cross retour                                  ║
+// ║  V8 corrections :                                                          ║
+// ║  1. TRAILING STOP : quand profit atteint 3%, suit le plus bas prix       ║
+// ║     Si rebond de 5% depuis le plus bas → sortie avec profit verrouillé   ║
+// ║  2. Exit plus rapide : 1 barre au-dessus EMA (au lieu de 2)             ║
+// ║  3. SL fixe toujours disponible en option                                 ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
-strategy("Phantom Short V7 — Trend Ride", overlay=true,
+strategy("Phantom Short V8 — Trend Ride", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=30,
      commission_type=strategy.commission.percent, commission_value=0.075,
      slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
@@ -37,13 +36,19 @@ adx_min       = input.float(20,  "ADX minimum",  step=1.0, group=grp2,
 grp3 = "Sortie"
 exit_mode     = input.string("Close au-dessus EMA rapide", "Mode de sortie",
      options=["Close au-dessus EMA rapide", "Close au-dessus EMA lente", "EMA re-cross haussier"], group=grp3)
-exit_bars     = input.int(2, "Barres consécutives au-dessus pour sortir", group=grp3, minval=1)
+exit_bars     = input.int(1, "Barres consécutives au-dessus pour sortir", group=grp3, minval=1)
 
-grp4 = "Stop Loss"
-use_sl        = input.bool(false, "Stop Loss fixe (désactivé = EMA gère tout)", group=grp4,
-     tooltip="DÉSACTIVÉ par défaut. L'EMA cross retour sert de stop. Activer seulement si vous voulez une sécurité absolue.")
-sl_pct        = input.float(25.0, "SL (% au-dessus de l'entrée)", step=0.5, group=grp4,
-     tooltip="25% = très large. Seulement en cas de flash crash inversé.")
+grp4 = "Trailing Stop — verrouille les gains"
+use_trail     = input.bool(true, "Trailing Stop actif", group=grp4,
+     tooltip="Quand le trade est en profit, suit le prix le plus bas. Si le prix remonte de X%, on sort avec le profit verrouillé.")
+trail_activate = input.float(3.0, "Activation (% de profit min)", step=0.5, group=grp4,
+     tooltip="Le trailing ne s'active qu'une fois ce seuil de profit atteint.")
+trail_pct     = input.float(5.0, "Trail (% de rebond depuis le plus bas)", step=0.5, group=grp4,
+     tooltip="Si le prix remonte de 5% depuis le point le plus bas du trade, on sort.")
+
+grp4b = "Stop Loss fixe"
+use_sl        = input.bool(false, "Stop Loss fixe (sécurité absolue)", group=grp4b)
+sl_pct        = input.float(25.0, "SL (% au-dessus de l'entrée)", step=0.5, group=grp4b)
 
 grp5 = "Anti-overtrading"
 min_bars_between = input.int(10, "Min barres entre trades", group=grp5)
@@ -109,15 +114,34 @@ exit_signal = strategy.position_size < 0 and bars_above_exit >= exit_bars
 // ══════════════════════════════════════════════════════════════════════════════
 
 var float entry_price = na
+var float lowest_price = na
+var bool trail_active = false
 
 if short_signal
     bars_since_trade := 0
     entry_price := close
+    lowest_price := close
+    trail_active := false
     strategy.entry("S", strategy.short)
 
     if use_sl
         float sl_level = close * (1 + sl_pct / 100)
         strategy.exit("S_sl", "S", stop=sl_level)
+
+// Trailing stop : suit le plus bas prix et sort si rebond trop fort
+if strategy.position_size < 0 and use_trail and not na(entry_price)
+    lowest_price := math.min(nz(lowest_price, close), close)
+    float profit_pct = (entry_price - lowest_price) / entry_price * 100
+    if profit_pct >= trail_activate
+        trail_active := true
+    if trail_active
+        float trail_level = lowest_price * (1 + trail_pct / 100)
+        if close >= trail_level
+            strategy.close("S", comment="Trail Exit")
+
+if strategy.position_size == 0
+    lowest_price := na
+    trail_active := false
 
 if exit_signal
     strategy.close("S", comment="Trend Exit")
@@ -193,9 +217,11 @@ if barstate.islast
     table.cell(d, 0, 5, "Taille", text_color=color.white, text_size=size.small)
     table.cell(d, 1, 5, "30% equity", text_color=color.white, text_size=size.small)
 
-    // SL
-    table.cell(d, 0, 6, "SL", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, use_sl ? str.tostring(sl_pct, "#.0") + "%" : "EMA exit only", text_color=use_sl ? color.orange : color.green, text_size=size.small)
+    // Trailing
+    trail_txt = use_trail ? (trail_active ? "ACTIF ↓" + str.tostring(lowest_price, "#") : "En attente (" + str.tostring(trail_activate, "#.0") + "%)") : "OFF"
+    trail_col = use_trail ? (trail_active ? color.green : color.yellow) : color.gray
+    table.cell(d, 0, 6, "Trail", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, trail_txt, text_color=trail_col, text_size=size.small)
 
     // Exit
     table.cell(d, 0, 7, "Sortie", text_color=color.white, text_size=size.small)
