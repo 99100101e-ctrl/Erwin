@@ -1,0 +1,212 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM EDGE V6 — Mean Reversion Engine                                   ║
+// ║  © Erwin 2026                                                               ║
+// ║                                                                            ║
+// ║  PHILOSOPHIE : BTC range 70% du temps                                      ║
+// ║  → On n'essaie plus de catcher les trends (déjà fini quand on voit)       ║
+// ║  → On achète les extremes oversold, on vend les extremes overbought        ║
+// ║                                                                            ║
+// ║  RÈGLES SIMPLES :                                                          ║
+// ║  LONG  → RSI < 30 + BB lower touch + Daily trend bullish (ou neutre)      ║
+// ║  SHORT → RSI > 70 + BB upper touch + Daily trend bearish                  ║
+// ║  SL    → 3x ATR (large pour les wicks BTC)                                ║
+// ║  TP    → retour au milieu BB (cible naturelle mean reversion)             ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy("Phantom Edge V6 — Mean Reversion", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PARAMÈTRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "RSI Extremes"
+rsi_len       = input.int(14,   "RSI Period", minval=5, group=grp1)
+rsi_oversold  = input.int(30,   "RSI Oversold (Long)", minval=10, maxval=40, group=grp1)
+rsi_overbought= input.int(70,   "RSI Overbought (Short)", minval=60, maxval=90, group=grp1)
+
+grp2 = "Bollinger Bands"
+bb_len        = input.int(20,   "BB Length", minval=10, group=grp2)
+bb_mult       = input.float(2.0,"BB Multiplier", step=0.1, group=grp2)
+
+grp3 = "Daily Trend Filter"
+use_daily     = input.bool(true, "Use Daily Trend Filter", group=grp3)
+daily_ema_len = input.int(50,   "Daily EMA Period", minval=10, group=grp3)
+
+grp4 = "Risk Management"
+atr_len       = input.int(14,   "ATR Period", group=grp4)
+sl_atr        = input.float(3.0,"SL Multiplier (x ATR)", step=0.25, group=grp4)
+tp_bb_middle  = input.bool(true, "TP = BB Middle (Mean)", group=grp4)
+tp_rr         = input.float(2.0,"TP Ratio (si pas BB middle)", step=0.25, group=grp4)
+
+grp5 = "Filtres"
+max_daily     = input.int(1,    "Max Trades/Jour", minval=1, group=grp5)
+use_sess      = input.bool(true, "Session Filter", group=grp5)
+sess_open     = input.int(6,    "Open (UTC)", group=grp5)
+sess_close    = input.int(20,   "Close (UTC)", group=grp5)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATEURS
+// ══════════════════════════════════════════════════════════════════════════════
+
+atr_val  = ta.atr(atr_len)
+rsi_val  = ta.rsi(close, rsi_len)
+
+// Bollinger Bands
+bb_basis = ta.sma(close, bb_len)
+bb_dev   = ta.stdev(close, bb_len)
+bb_upper = bb_basis + bb_dev * bb_mult
+bb_lower = bb_basis - bb_dev * bb_mult
+bb_width = (bb_upper - bb_lower) / bb_basis  // BB width ratio
+
+// Éviter de trader en squeeze BB extrême (trop étroit = faux signal)
+bb_ok = bb_width > 0.015  // BB doit avoir un minimum d'ouverture (1.5%)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FILTRE TREND DAILY (via request.security)
+// ══════════════════════════════════════════════════════════════════════════════
+
+daily_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+daily_ema   = request.security(syminfo.tickerid, "D", ta.ema(close, daily_ema_len), lookahead=barmerge.lookahead_off)
+daily_ema_prev = request.security(syminfo.tickerid, "D", ta.ema(close, daily_ema_len)[1], lookahead=barmerge.lookahead_off)
+
+// Trend daily
+daily_bull = not use_daily or (daily_close > daily_ema and daily_ema >= daily_ema_prev)  // trend haussier
+daily_bear = not use_daily or (daily_close < daily_ema and daily_ema <= daily_ema_prev)  // trend baissier
+daily_neutral = not use_daily or (daily_close > daily_ema * 0.97 and daily_close < daily_ema * 1.03)  // neutre
+
+// Pour les longs : on accepte si daily bull OU neutre (pas short un bull run)
+long_daily_ok  = daily_bull or daily_neutral
+short_daily_ok = daily_bear
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX MEAN REVERSION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG : RSI oversold + prix touche ou passe sous BB lower
+long_rsi   = rsi_val <= rsi_oversold
+long_bb    = low <= bb_lower
+long_close_confirm = close > bb_lower  // bougie qui ferme AU DESSUS de la bande = rebond
+long_setup = long_rsi and long_bb and long_close_confirm and bb_ok
+
+// SHORT : RSI overbought + prix touche ou passe au-dessus BB upper
+short_rsi   = rsi_val >= rsi_overbought
+short_bb    = high >= bb_upper
+short_close_confirm = close < bb_upper  // bougie qui ferme EN DESSOUS de la bande = rejet
+short_setup = short_rsi and short_bb and short_close_confirm and bb_ok
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION + DAILY LIMIT
+// ══════════════════════════════════════════════════════════════════════════════
+
+hr = hour(time, "UTC")
+in_session = not use_sess or (hr >= sess_open and hr < sess_close)
+
+var int day_trades = 0
+if ta.change(dayofmonth(time)) != 0
+    day_trades := 0
+can_trade = day_trades < max_daily
+
+no_pos = strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAUX FINAUX
+// ══════════════════════════════════════════════════════════════════════════════
+
+final_long  = long_setup  and long_daily_ok  and in_session and can_trade and no_pos
+final_short = short_setup and short_daily_ok and in_session and can_trade and no_pos
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GESTION DES ORDRES
+// ══════════════════════════════════════════════════════════════════════════════
+
+if final_long
+    float sl   = close - atr_val * sl_atr
+    float risk = close - sl
+    if risk > 0
+        float tp = tp_bb_middle ? bb_basis : close + risk * tp_rr
+        day_trades += 1
+        strategy.entry("L", strategy.long)
+        strategy.exit("L_exit", "L", stop=sl, limit=tp)
+
+if final_short
+    float sl   = close + atr_val * sl_atr
+    float risk = sl - close
+    if risk > 0
+        float tp = tp_bb_middle ? bb_basis : close - risk * tp_rr
+        day_trades += 1
+        strategy.entry("S", strategy.short)
+        strategy.exit("S_exit", "S", stop=sl, limit=tp)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Bollinger Bands
+p_basis = plot(bb_basis, "BB Middle", color.new(color.yellow, 50), linewidth=1)
+p_upper = plot(bb_upper, "BB Upper",  color.new(color.red, 40), linewidth=1)
+p_lower = plot(bb_lower, "BB Lower",  color.new(color.green, 40), linewidth=1)
+fill(p_upper, p_lower, color.new(color.gray, 92))
+
+// Daily EMA
+plot(daily_ema, "Daily EMA", color.new(color.orange, 30), linewidth=2)
+
+// Signaux
+plotshape(final_long,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=color.new(color.green, 0), text="▲ L")
+plotshape(final_short, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=color.new(color.red, 0),   text="▼ S")
+
+// Zones RSI extremes (fond subtil)
+bgcolor(rsi_val <= rsi_oversold   ? color.new(color.green, 94) : na, title="Oversold Zone")
+bgcolor(rsi_val >= rsi_overbought ? color.new(color.red, 94)   : na, title="Overbought Zone")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast
+    var table d = table.new(position=position.top_right, rows=7, columns=2,
+         bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
+
+    table.cell(d, 0, 0, "PE V6 — MeanRev", bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "RSI + BB",         bgcolor=color.new(#FF6600, 20), text_color=color.white, text_size=size.small)
+
+    // RSI
+    rsi_col = rsi_val <= rsi_oversold ? color.green : rsi_val >= rsi_overbought ? color.red : color.white
+    rsi_lbl = rsi_val <= rsi_oversold ? "OVERSOLD ▲" : rsi_val >= rsi_overbought ? "OVERBOUGHT ▼" : str.tostring(rsi_val, "#.0")
+    table.cell(d, 0, 1, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 1, rsi_lbl, text_color=rsi_col, text_size=size.small)
+
+    // BB position
+    bb_pct = (close - bb_lower) / (bb_upper - bb_lower) * 100
+    bb_col = bb_pct < 20 ? color.green : bb_pct > 80 ? color.red : color.white
+    table.cell(d, 0, 2, "BB Position", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 2, str.tostring(bb_pct, "#.0") + "%", text_color=bb_col, text_size=size.small)
+
+    // Daily Trend
+    dt_txt = daily_bull ? "BULL ▲" : daily_bear ? "BEAR ▼" : "NEUTRE"
+    dt_col = daily_bull ? color.green : daily_bear ? color.red : color.gray
+    table.cell(d, 0, 3, "Trend Daily", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 3, dt_txt, text_color=dt_col, text_size=size.small)
+
+    // BB Width
+    bw_col = bb_ok ? color.white : color.orange
+    table.cell(d, 0, 4, "BB Width", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 4, str.tostring(bb_width * 100, "#.2") + "%" + (bb_ok ? "" : " SQUEEZE"), text_color=bw_col, text_size=size.small)
+
+    // Session
+    table.cell(d, 0, 5, "Session", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, in_session ? "ACTIVE" : "FERMÉE", text_color=in_session ? color.green : color.gray, text_size=size.small)
+
+    // Trades
+    table.cell(d, 0, 6, "Trades/Jour", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, str.tostring(day_trades) + "/" + str.tostring(max_daily), text_color=day_trades >= max_daily ? color.red : color.white, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(final_long,  title="PE V6 LONG",  message="MEAN REVERSION LONG — RSI Oversold + BB Lower {{close}}")
+alertcondition(final_short, title="PE V6 SHORT", message="MEAN REVERSION SHORT — RSI Overbought + BB Upper {{close}}")
