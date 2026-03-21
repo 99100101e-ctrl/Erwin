@@ -1,2 +1,4 @@
 .env
 __pycache__/
+scanner_state.json
+scanner_state_v13.json
