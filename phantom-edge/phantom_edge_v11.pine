@@ -359,3 +359,22 @@ if barstate.islast
 
 alertcondition(long_signal,  title="V11 LONG",  message="PE V11 LONG — Pullback | {{close}}")
 alertcondition(short_signal, title="V11 SHORT", message="PE V11 SHORT — EMA cross (Daily) | {{close}}")
+
+// ── Alertes enrichies (webhook Telegram / Discord) ──
+if long_signal
+    sl_l  = close - atr_val * long_sl_mult
+    risk_l = close - sl_l
+    tp_l  = close + risk_l * long_tp_rr
+    alert("🟢 LONG BTC\n📍 Entry: " + str.tostring(close, "#.##") +
+          "\n🛑 SL: " + str.tostring(sl_l, "#.##") +
+          "\n🎯 TP: " + str.tostring(tp_l, "#.##") +
+          "\n📊 TF: " + timeframe.period +
+          "\n⏰ " + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone),
+          alert.freq_once_per_bar)
+
+if short_signal
+    alert("🔴 SHORT BTC\n📍 Entry: " + str.tostring(close, "#.##") +
+          "\n📊 TF: Daily" +
+          "\n📈 ADX: " + str.tostring(s_adx_val, "#.0") +
+          "\n⏰ " + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone),
+          alert.freq_once_per_bar)
