@@ -1,18 +1,20 @@
 // ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  PHANTOM EDGE V14 — V13 + Risk Management + ADX Filter                   ║
+// ║  PHANTOM EDGE V14 — V13 Améliorée (pas bridée)                           ║
 // ║  © Erwin 2026                                                             ║
 // ║                                                                           ║
-// ║  Logique V13 identique (SuperTrend + EMA pullback)                       ║
-// ║  + Filtre ADX (pas de trade en marché choppy)                            ║
-// ║  + Score de confiance affiché dans le dashboard                          ║
-// ║  + Position sizing dynamique (2% risque/trade)                           ║
-// ║  + Circuit breaker (3 pertes consécutives = pause)                       ║
+// ║  Base V13 intacte (SuperTrend + EMA pullback + 100% equity)              ║
+// ║  + ADX comme BOOSTER (pas comme filtre bloquant)                         ║
+// ║    → ADX fort = on reste 100%, ADX faible = taille réduite              ║
+// ║  + Score de confiance pour ajuster la taille                             ║
+// ║    → Confiance haute = 100%, basse = taille réduite (mais on trade)     ║
+// ║  + Circuit breaker intelligent (réduit au lieu de couper)                ║
+// ║  + RSI divergence comme filtre additionnel                               ║
 // ║                                                                           ║
-// ║  ⚠️  Version de TEST — correspond au bot V14 (telegram-bot-v2)           ║
+// ║  Philosophie : améliorer la qualité sans perdre de trades                ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //@version=6
-strategy("Phantom Edge V14 — Risk Managed", overlay=true,
+strategy("Phantom Edge V14 — Enhanced", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      commission_type=strategy.commission.percent, commission_value=0.075,
      slippage=2, initial_capital=10000, pyramiding=0, calc_on_every_tick=false)
@@ -61,18 +63,30 @@ sess_open  = input.int(7,  "Open (UTC)",       group=grp7)
 sess_close = input.int(21, "Close (UTC)",      group=grp7)
 max_daily  = input.int(3,  "Max Trades/Jour",  group=grp7)
 
-// ── V14 — Nouveaux paramètres ──
-grp8 = "V14 — ADX Filter"
-use_adx      = input.bool(true,  "Activer filtre ADX",  group=grp8)
+// ── V14 — Paramètres intelligents ──
+grp8 = "V14 — ADX Booster"
+use_adx      = input.bool(true,  "Activer ADX booster",  group=grp8)
 adx_period   = input.int(14,     "ADX Period",           minval=5,  group=grp8)
-adx_min      = input.float(20.0, "ADX minimum",          step=1.0,  group=grp8,
-     tooltip="ADX < 20 = marché choppy/range → pas de trade")
+adx_strong   = input.float(25.0, "ADX fort (100% size)", step=1.0,  group=grp8,
+     tooltip="ADX >= 25 = trend fort → position pleine")
+adx_weak     = input.float(15.0, "ADX faible (taille réduite)", step=1.0, group=grp8,
+     tooltip="ADX < 15 = choppy → position réduite à 50%")
 
-grp9 = "V14 — Confiance & Risk"
-min_confidence    = input.int(3,     "Confiance minimum (1-5)", minval=1, maxval=5, group=grp9)
-risk_per_trade    = input.float(2.0, "Risque par trade (%)",    step=0.5, group=grp9)
-use_circuit_break = input.bool(true, "Circuit Breaker",         group=grp9)
-max_consec_losses = input.int(3,     "Max pertes consécutives", minval=1, group=grp9)
+grp9 = "V14 — Sizing adaptatif"
+use_adaptive_size = input.bool(true, "Sizing adaptatif (confiance + ADX)", group=grp9)
+min_size_pct      = input.float(50.0, "Taille minimum (%)", step=10.0, group=grp9,
+     tooltip="En cas de faible confiance/ADX, on descend à ce % de la position")
+use_circuit_break = input.bool(true,  "Circuit Breaker (réduction)", group=grp9)
+max_consec_losses = input.int(3,      "Pertes consécutives → réduire", minval=1, group=grp9)
+cb_reduce_pct     = input.float(50.0, "Réduction CB (%)", step=10.0, group=grp9,
+     tooltip="Après N pertes, réduire la taille de ce % (pas d'arrêt total)")
+
+grp10 = "V14 — RSI Filtre"
+use_rsi_filter = input.bool(true, "Filtre RSI anti-extrême", group=grp10,
+     tooltip="Évite d'acheter en surachat ou vendre en survente")
+rsi_len        = input.int(14,    "RSI Period",  group=grp10)
+rsi_ob         = input.float(75.0, "Surachat",   step=5.0, group=grp10)
+rsi_os         = input.float(25.0, "Survente",   step=5.0, group=grp10)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // INDICATEURS
@@ -131,10 +145,23 @@ adx(dilen, adxlen) =>
     adx_val
 
 adx_val = adx(adx_period, adx_period)
-adx_ok  = not use_adx or adx_val >= adx_min
+
+// ADX sizing multiplier : 1.0 si fort, descend vers min_size_pct si faible
+adx_size_mult = not use_adx ? 1.0 :
+     adx_val >= adx_strong ? 1.0 :
+     adx_val <= adx_weak ? min_size_pct / 100 :
+     min_size_pct / 100 + (1.0 - min_size_pct / 100) * (adx_val - adx_weak) / (adx_strong - adx_weak)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// V14 — SCORE DE CONFIANCE (0-5)
+// V14 — RSI (filtre anti-extrêmes)
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsi_val = ta.rsi(close, rsi_len)
+rsi_long_ok  = not use_rsi_filter or rsi_val < rsi_ob   // pas d'achat en surachat
+rsi_short_ok = not use_rsi_filter or rsi_val > rsi_os   // pas de short en survente
+
+// ══════════════════════════════════════════════════════════════════════════════
+// V14 — SCORE DE CONFIANCE (0-5) — pour sizing, pas pour bloquer
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Volume spike
@@ -145,26 +172,30 @@ vol_spike = volume > vol_ma * 1.3
 long_conf = 0
 long_conf := long_conf + (st_bull ? 1 : 0)
 long_conf := long_conf + (ema_f > ema_s ? 1 : 0)
-long_conf := long_conf + (pb_long ? 1 : 0)
-long_conf := long_conf + (adx_ok ? 1 : 0)
+long_conf := long_conf + (close > ema200 ? 1 : 0)
+long_conf := long_conf + (adx_val >= adx_strong ? 1 : 0)
 long_conf := long_conf + (vol_spike ? 1 : 0)
 
 // Short confidence
 short_conf = 0
 short_conf := short_conf + (st_bear ? 1 : 0)
 short_conf := short_conf + (ema_f < ema_s ? 1 : 0)
-short_conf := short_conf + (pb_short ? 1 : 0)
-short_conf := short_conf + (adx_ok ? 1 : 0)
-short_conf := short_conf + (short_macro ? 1 : 0)
+short_conf := short_conf + (close < ema200 ? 1 : 0)
+short_conf := short_conf + (adx_val >= adx_strong ? 1 : 0)
+short_conf := short_conf + (vol_spike ? 1 : 0)
+
+// Confidence sizing : 5/5 = 100%, 3/5 = ~70%, 1/5 = min_size_pct
+conf_size_mult(conf) =>
+    min_s = min_size_pct / 100
+    min_s + (1.0 - min_s) * conf / 5.0
 
 // ══════════════════════════════════════════════════════════════════════════════
-// V14 — CIRCUIT BREAKER
+// V14 — CIRCUIT BREAKER (réduit, ne coupe pas)
 // ══════════════════════════════════════════════════════════════════════════════
 
 var int consec_losses = 0
-var bool cb_paused    = false
+var bool cb_active    = false
 
-// Track wins/losses à la fermeture
 if strategy.closedtrades > 0
     last_pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
     if ta.change(strategy.closedtrades) > 0
@@ -172,36 +203,30 @@ if strategy.closedtrades > 0
             consec_losses += 1
         else
             consec_losses := 0
-        if use_circuit_break and consec_losses >= max_consec_losses
-            cb_paused := true
+        cb_active := use_circuit_break and consec_losses >= max_consec_losses
 
 // Reset au nouveau jour
 if ta.change(dayofmonth(time)) != 0
-    cb_paused    := false
+    cb_active     := false
     consec_losses := 0
 
-circuit_ok = not use_circuit_break or not cb_paused
+cb_size_mult = cb_active ? (100.0 - cb_reduce_pct) / 100.0 : 1.0
 
 // ══════════════════════════════════════════════════════════════════════════════
-// V14 — POSITION SIZING (2% risque par trade)
+// V14 — SIZING FINAL (multiplicateurs combinés)
 // ══════════════════════════════════════════════════════════════════════════════
 
-calc_qty(entry_price, sl_price) =>
-    sl_dist = math.abs(entry_price - sl_price)
-    sl_pct  = sl_dist / entry_price
-    risk_amount = strategy.equity * risk_per_trade / 100
-    pos_value   = sl_pct > 0 ? risk_amount / sl_pct : 0
-    // Cap à 50% de l'equity
-    pos_value := math.min(pos_value, strategy.equity * 0.5)
-    qty = pos_value / entry_price
-    qty
+// Combine : ADX × confiance × circuit breaker
+// Résultat = % de la position standard (qui est 100% equity comme V13)
+long_size_pct  = use_adaptive_size ? math.max(min_size_pct / 100, adx_size_mult * conf_size_mult(long_conf) * cb_size_mult) : (cb_active ? cb_size_mult : 1.0)
+short_size_pct = use_adaptive_size ? math.max(min_size_pct / 100, adx_size_mult * conf_size_mult(short_conf) * cb_size_mult) : (cb_active ? cb_size_mult : 1.0)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SIGNAUX (V13 + filtres V14)
+// SIGNAUX — Base V13 exacte + filtre RSI (pas d'ADX bloquant, pas de conf min)
 // ══════════════════════════════════════════════════════════════════════════════
 
-long_signal  = allow_long  and trend_up   and pb_long  and in_session and can_trade and no_pos and adx_ok and long_conf >= min_confidence and circuit_ok
-short_signal = allow_short and trend_down and pb_short and short_macro and in_session and can_trade and no_pos and adx_ok and short_conf >= min_confidence and circuit_ok
+long_signal  = allow_long  and trend_up   and pb_long  and in_session and can_trade and no_pos and rsi_long_ok
+short_signal = allow_short and trend_down and pb_short and short_macro and in_session and can_trade and no_pos and rsi_short_ok
 
 // ══════════════════════════════════════════════════════════════════════════════
 // GESTION DES ORDRES
@@ -219,16 +244,15 @@ if st_bull and strategy.position_size < 0
     strategy.close("S", comment="ST Flip ▲")
     trail_short_val := na
 
-// ── LONG ──
+// ── LONG ── (V13 + sizing adaptatif)
 if long_signal
     float sl   = close - atr_val * long_sl_mult
     float risk = close - sl
     if risk > 0
-        float qty = calc_qty(close, sl)
         day_trades += 1
         trail_long_val  := sl
         trail_short_val := na
-        strategy.entry("L", strategy.long, qty=qty)
+        strategy.entry("L", strategy.long, qty=strategy.equity * long_size_pct / close)
         if not long_use_trail
             strategy.exit("L_exit", "L", stop=sl, limit=close + risk * long_tp_rr)
 
@@ -238,16 +262,15 @@ if long_use_trail and strategy.position_size > 0 and not na(trail_long_val)
         strategy.close("L", comment="Trail L")
         trail_long_val := na
 
-// ── SHORT ──
+// ── SHORT ── (V13 + sizing adaptatif)
 if short_signal
     float sl   = close + atr_val * short_sl_mult
     float risk = sl - close
     if risk > 0
-        float qty = calc_qty(close, sl)
         day_trades += 1
         trail_short_val := sl
         trail_long_val  := na
-        strategy.entry("S", strategy.short, qty=qty)
+        strategy.entry("S", strategy.short, qty=strategy.equity * short_size_pct / close)
 
         if short_exit == "Fixed TP"
             strategy.exit("S_exit", "S", stop=sl, limit=close - risk * short_tp_rr)
@@ -275,26 +298,23 @@ plot(strategy.position_size < 0 and short_exit == "Trail Large" ? trail_short_va
 
 bgcolor(trend_up ? color.new(color.green, 94) : trend_down ? color.new(color.red, 94) : color.new(color.gray, 97))
 
-// Signal markers avec confiance
+// Signal markers
 plotshape(long_signal,  title="LONG",  location=location.belowbar, style=shape.triangleup,   size=size.large, color=#00FF88, text="▲ L")
 plotshape(short_signal, title="SHORT", location=location.abovebar, style=shape.triangledown, size=size.large, color=#FF4444, text="▼ S")
 
-// ADX choppy warning
-plotshape(use_adx and adx_val < adx_min and no_pos and (trend_up or trend_down), title="ADX Low", location=location.bottom, style=shape.xcross, size=size.tiny, color=color.new(color.yellow, 20), text="choppy")
-
-// Circuit breaker pause marker
-plotshape(cb_paused, title="CB Pause", location=location.top, style=shape.flag, size=size.small, color=color.red, text="PAUSE")
+// Circuit breaker warning
+plotshape(cb_active, title="CB Active", location=location.top, style=shape.flag, size=size.small, color=color.orange, text="CB -50%")
 
 // ══════════════════════════════════════════════════════════════════════════════
 // DASHBOARD V14
 // ══════════════════════════════════════════════════════════════════════════════
 
 if barstate.islast
-    var table d = table.new(position=position.top_right, rows=12, columns=2,
+    var table d = table.new(position=position.top_right, rows=13, columns=2,
          bgcolor=color.new(#0d0d1a, 5), border_width=1, border_color=color.new(#333366, 0))
 
     table.cell(d, 0, 0, "PE V14", bgcolor=color.new(#9900FF, 20), text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 0, "Risk Managed", bgcolor=color.new(#9900FF, 20), text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 0, "Enhanced", bgcolor=color.new(#9900FF, 20), text_color=color.white, text_size=size.small)
 
     table.cell(d, 0, 1, "SuperTrend", text_color=color.white, text_size=size.small)
     table.cell(d, 1, 1, st_bull ? "BULL ▲" : "BEAR ▼", text_color=st_bull ? color.green : color.red, text_size=size.small)
@@ -306,43 +326,49 @@ if barstate.islast
     table.cell(d, 1, 3, close > ema200 ? "Au-dessus" : "En-dessous", text_color=close > ema200 ? color.green : color.red, text_size=size.small)
 
     // ADX
-    adx_col = adx_val >= adx_min ? color.green : color.red
+    adx_col = adx_val >= adx_strong ? color.green : adx_val >= adx_weak ? color.orange : color.red
     table.cell(d, 0, 4, "ADX", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 4, str.tostring(adx_val, "#.0") + (adx_val >= adx_min ? " ✓" : " ✗ choppy"), text_color=adx_col, text_size=size.small)
+    table.cell(d, 1, 4, str.tostring(adx_val, "#.0") + (adx_val >= adx_strong ? " FORT" : adx_val >= adx_weak ? " moyen" : " faible"), text_color=adx_col, text_size=size.small)
+
+    // RSI
+    rsi_col = rsi_val > rsi_ob ? color.red : rsi_val < rsi_os ? color.green : color.gray
+    table.cell(d, 0, 5, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 5, str.tostring(rsi_val, "#.0") + (rsi_val > rsi_ob ? " OB" : rsi_val < rsi_os ? " OS" : ""), text_color=rsi_col, text_size=size.small)
 
     // Trend
     dir_txt = trend_up ? "▲ LONG" : trend_down ? "▼ SHORT" : "— NEUTRE"
     dir_col = trend_up ? color.green : trend_down ? color.red : color.gray
-    table.cell(d, 0, 5, "Trend", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 5, dir_txt, text_color=dir_col, text_size=size.small, bgcolor=color.new(dir_col, 85))
+    table.cell(d, 0, 6, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 6, dir_txt, text_color=dir_col, text_size=size.small, bgcolor=color.new(dir_col, 85))
 
     // Confiance
     conf_val  = trend_up ? long_conf : trend_down ? short_conf : 0
-    conf_text = str.tostring(conf_val) + "/5"
-    conf_col  = conf_val >= 4 ? color.green : conf_val >= min_confidence ? color.orange : color.red
-    table.cell(d, 0, 6, "Confiance", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 6, conf_text + (conf_val >= min_confidence ? " ✓" : " ✗"), text_color=conf_col, text_size=size.small)
+    conf_col  = conf_val >= 4 ? color.green : conf_val >= 3 ? color.orange : color.red
+    table.cell(d, 0, 7, "Confiance", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 7, str.tostring(conf_val) + "/5", text_color=conf_col, text_size=size.small)
+
+    // Sizing actuel
+    cur_size = trend_up ? long_size_pct : trend_down ? short_size_pct : 1.0
+    size_col = cur_size >= 0.8 ? color.green : cur_size >= 0.5 ? color.orange : color.red
+    table.cell(d, 0, 8, "Sizing", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 8, str.tostring(cur_size * 100, "#") + "%", text_color=size_col, text_size=size.small)
 
     // Volume
-    table.cell(d, 0, 7, "Volume", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 7, vol_spike ? "Spike ▲" : "Normal", text_color=vol_spike ? color.green : color.gray, text_size=size.small)
-
-    // Risk par trade
-    table.cell(d, 0, 8, "Risk/Trade", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 8, str.tostring(risk_per_trade, "#.0") + "%", text_color=color.aqua, text_size=size.small)
+    table.cell(d, 0, 9, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 9, vol_spike ? "Spike ▲" : "Normal", text_color=vol_spike ? color.green : color.gray, text_size=size.small)
 
     // Long / Short config
-    table.cell(d, 0, 9, "Long", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 9, long_use_trail ? "Trail " + str.tostring(long_trail_m) + "x" : "TP " + str.tostring(long_tp_rr) + "x", text_color=color.lime, text_size=size.small)
+    table.cell(d, 0, 10, "Long", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 10, long_use_trail ? "Trail " + str.tostring(long_trail_m) + "x" : "TP " + str.tostring(long_tp_rr) + "x", text_color=color.lime, text_size=size.small)
 
-    table.cell(d, 0, 10, "Short", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 10, short_exit + " | SL " + str.tostring(short_sl_mult) + "x", text_color=color.fuchsia, text_size=size.small)
+    table.cell(d, 0, 11, "Short", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 11, short_exit + " | SL " + str.tostring(short_sl_mult) + "x", text_color=color.fuchsia, text_size=size.small)
 
     // Circuit Breaker
-    cb_txt = cb_paused ? "PAUSE (" + str.tostring(consec_losses) + " losses)" : str.tostring(consec_losses) + "/" + str.tostring(max_consec_losses) + " losses"
-    cb_col = cb_paused ? color.red : consec_losses > 0 ? color.orange : color.green
-    table.cell(d, 0, 11, "Circuit B.", text_color=color.white, text_size=size.small)
-    table.cell(d, 1, 11, cb_txt, text_color=cb_col, text_size=size.small)
+    cb_txt = cb_active ? "ACTIF (-" + str.tostring(cb_reduce_pct, "#") + "%)" : str.tostring(consec_losses) + "/" + str.tostring(max_consec_losses)
+    cb_col = cb_active ? color.orange : consec_losses > 0 ? color.yellow : color.green
+    table.cell(d, 0, 12, "Circuit B.", text_color=color.white, text_size=size.small)
+    table.cell(d, 1, 12, cb_txt, text_color=cb_col, text_size=size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ALERTES
@@ -350,4 +376,4 @@ if barstate.islast
 
 alertcondition(long_signal,  title="V14 LONG",  message="PE V14 LONG — Pullback EMA21 | {{close}}")
 alertcondition(short_signal, title="V14 SHORT", message="PE V14 SHORT — Pullback EMA21 | {{close}}")
-alertcondition(cb_paused,    title="V14 PAUSE", message="PE V14 CIRCUIT BREAKER — Trading en pause")
+alertcondition(cb_active,    title="V14 CB",    message="PE V14 CIRCUIT BREAKER — Taille reduite")
