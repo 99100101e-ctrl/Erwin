@@ -224,6 +224,7 @@ class ScannerState:
         # Long management
         self.trail_long: float = 0
         self.long_be_reached: bool = False
+        self.long_tp: float = 0
 
         # Short management
         self.short_lowest: float = 0
@@ -264,7 +265,8 @@ class ScannerState:
 class Signal:
     def __init__(self, direction: str, timeframe: str, entry: float,
                  sl: float = 0, tp: float = 0, adx: float = 0,
-                 st_dir: str = "", ema_align: str = ""):
+                 st_dir: str = "", ema_align: str = "",
+                 confidence: int = 0, conf_details: str = ""):
         self.direction = direction
         self.timeframe = timeframe
         self.entry = entry
@@ -273,6 +275,8 @@ class Signal:
         self.adx = adx
         self.st_dir = st_dir
         self.ema_align = ema_align
+        self.confidence = confidence      # 0-100
+        self.conf_details = conf_details  # detail des criteres
 
 
 def check_long(klines: np.ndarray, tf_label: str) -> Optional[Signal]:
@@ -310,6 +314,51 @@ def check_long(klines: np.ndarray, tf_label: str) -> Optional[Signal]:
         risk = close[idx] - sl
         if risk > 0:
             tp = close[idx] + risk * LONG_TP_RR
+
+            # ── Score de confiance (0-100) ──
+            score = 0
+            details = []
+
+            # SuperTrend bull (requis, +20)
+            score += 20
+            details.append("ST bull +20")
+
+            # EMA 21 > 50 (requis, +20)
+            score += 20
+            details.append("EMA align +20")
+
+            # Pullback EMA 21 (requis, +15)
+            score += 15
+            details.append("Pullback +15")
+
+            # Bougie haussière forte (close near high = +15)
+            candle_body = close[idx] - open_[idx]
+            candle_range = high_[idx] - low_[idx]
+            if candle_range > 0:
+                body_ratio = candle_body / candle_range
+                if body_ratio > 0.6:
+                    score += 15
+                    details.append("Bougie forte +15")
+                elif body_ratio > 0.3:
+                    score += 8
+                    details.append("Bougie ok +8")
+
+            # EMA 200 trend (prix au-dessus = +15)
+            ema_macro = ema(close, EMA_MACRO_LEN)
+            if not np.isnan(ema_macro[idx]) and close[idx] > ema_macro[idx]:
+                score += 15
+                details.append("EMA200 bull +15")
+
+            # Volume (derniere bougie > moyenne 20 = +15)
+            vol = klines[:, 5]
+            avg_vol = np.mean(vol[max(0, idx - 20):idx]) if idx > 20 else np.mean(vol[:idx])
+            if avg_vol > 0 and vol[idx] > avg_vol * 1.2:
+                score += 15
+                details.append("Volume fort +15")
+            elif avg_vol > 0 and vol[idx] > avg_vol:
+                score += 8
+                details.append("Volume ok +8")
+
             return Signal(
                 direction="LONG",
                 timeframe=tf_label,
@@ -318,6 +367,8 @@ def check_long(klines: np.ndarray, tf_label: str) -> Optional[Signal]:
                 tp=tp,
                 st_dir="BULL",
                 ema_align="21 > 50",
+                confidence=min(score, 100),
+                conf_details=" | ".join(details),
             )
     return None
 
@@ -345,12 +396,52 @@ def check_short(klines_daily: np.ndarray) -> Optional[Signal]:
     di_ok = di_minus[idx] > di_plus[idx]
 
     if bearish_cross and adx_ok and di_ok:
+        # ── Score de confiance (0-100) ──
+        score = 0
+        details = []
+
+        # EMA bearish cross (requis, +25)
+        score += 25
+        details.append("EMA cross +25")
+
+        # ADX force (+25 si fort, +15 si moyen)
+        if adx_val[idx] >= 30:
+            score += 25
+            details.append(f"ADX {adx_val[idx]:.0f} fort +25")
+        else:
+            score += 15
+            details.append(f"ADX {adx_val[idx]:.0f} ok +15")
+
+        # DI- dominance (+20 si fort ecart)
+        di_spread = di_minus[idx] - di_plus[idx]
+        if di_spread > 10:
+            score += 20
+            details.append("DI- domine +20")
+        else:
+            score += 10
+            details.append("DI- ok +10")
+
+        # EMA 200 trend (prix en-dessous = +15)
+        ema_macro = ema(close, EMA_MACRO_LEN)
+        if not np.isnan(ema_macro[idx]) and close[idx] < ema_macro[idx]:
+            score += 15
+            details.append("EMA200 bear +15")
+
+        # Volume (+15)
+        vol = klines_daily[:, 5]
+        avg_vol = np.mean(vol[max(0, idx - 20):idx]) if idx > 20 else np.mean(vol[:idx])
+        if avg_vol > 0 and vol[idx] > avg_vol * 1.2:
+            score += 15
+            details.append("Volume fort +15")
+
         return Signal(
             direction="SHORT",
             timeframe="1D",
             entry=close[idx],
             adx=adx_val[idx],
             ema_align="21 < 50 (cross)",
+            confidence=min(score, 100),
+            conf_details=" | ".join(details),
         )
     return None
 
@@ -377,6 +468,7 @@ def manage_long(state: ScannerState, klines_4h: np.ndarray) -> Optional[str]:
     if st_dir[idx] > 0:
         state.position = "FLAT"
         state.trail_long = 0
+        state.long_tp = 0
         state.long_be_reached = False
         pnl = (cur_close - state.entry_price) / state.entry_price * 100
         return f"SuperTrend Flip \u25bc | PnL: {pnl:+.2f}%"
@@ -389,6 +481,7 @@ def manage_long(state: ScannerState, klines_4h: np.ndarray) -> Optional[str]:
         if state.long_be_reached and cur_close <= state.entry_price:
             state.position = "FLAT"
             state.trail_long = 0
+            state.long_tp = 0
             state.long_be_reached = False
             return "BE Stop Long | PnL: ~0%"
 
@@ -400,6 +493,7 @@ def manage_long(state: ScannerState, klines_4h: np.ndarray) -> Optional[str]:
             pnl = (cur_close - state.entry_price) / state.entry_price * 100
             state.position = "FLAT"
             state.trail_long = 0
+            state.long_tp = 0
             state.long_be_reached = False
             return f"Trailing Stop Long | PnL: {pnl:+.2f}%"
 
@@ -474,11 +568,31 @@ def send_telegram(text: str) -> bool:
         return False
 
 
+def _confidence_bar(score: int) -> str:
+    """Barre visuelle du score de confiance."""
+    filled = score // 10
+    empty = 10 - filled
+    bar = "\u2588" * filled + "\u2591" * empty
+    if score >= 80:
+        emoji = "\U0001F7E2"
+        label = "FORT"
+    elif score >= 60:
+        emoji = "\U0001F7E1"
+        label = "MOYEN"
+    else:
+        emoji = "\U0001F534"
+        label = "FAIBLE"
+    return f"{emoji} {bar} {score}/100 ({label})"
+
+
 def format_long_alert(sig: Signal) -> str:
     risk = sig.entry - sig.sl
     rr = (sig.tp - sig.entry) / risk if risk > 0 else 0
+    conf_line = _confidence_bar(sig.confidence)
     return (
-        "\U0001F7E2 <b>LONG BTC</b> — Pullback\n"
+        "\U0001F7E2 <b>LONG BTC</b> \u2014 Pullback\n"
+        f"\n"
+        f"\U0001F3AF Confiance: {conf_line}\n"
         f"\n"
         f"\U0001F4CD Entry: <code>{sig.entry:,.2f}</code>\n"
         f"\U0001F6D1 SL: <code>{sig.sl:,.2f}</code> (ATR x {LONG_SL_MULT})\n"
@@ -487,13 +601,17 @@ def format_long_alert(sig: Signal) -> str:
         f"\U0001F4C8 SuperTrend: {sig.st_dir} | EMA: {sig.ema_align}\n"
         f"\U0001F4CA TF: {sig.timeframe} | R:R = 1:{rr:.1f}\n"
         f"\U0001F6E1 Trail: ATR x {LONG_TRAIL_MULT} | BE: +{LONG_BE_PCT}%\n"
+        f"\U0001F4CB <i>{sig.conf_details}</i>\n"
         f"\U0000231A {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
     )
 
 
 def format_short_alert(sig: Signal) -> str:
+    conf_line = _confidence_bar(sig.confidence)
     return (
-        "\U0001F534 <b>SHORT BTC</b> — EMA Cross (Daily)\n"
+        "\U0001F534 <b>SHORT BTC</b> \u2014 EMA Cross (Daily)\n"
+        f"\n"
+        f"\U0001F3AF Confiance: {conf_line}\n"
         f"\n"
         f"\U0001F4CD Entry: <code>{sig.entry:,.2f}</code>\n"
         f"\U0001F4C9 ADX: {sig.adx:.1f} | EMA: {sig.ema_align}\n"
@@ -501,6 +619,7 @@ def format_short_alert(sig: Signal) -> str:
         f"\U0001F6E1 BE: +{SHORT_BE_PCT}% | Time: {SHORT_TIME_BARS} bars\n"
         f"\U0001F504 Trail: act. +{SHORT_TRAIL_ACT}%, offset {SHORT_TRAIL_PCT}%\n"
         f"\U0001F6AA Exit: EMA re-cross haussier\n"
+        f"\U0001F4CB <i>{sig.conf_details}</i>\n"
         f"\U0000231A {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
     )
 
@@ -641,6 +760,7 @@ def main():
                         state.entry_price = long_sig.entry
                         state.entry_time = now.isoformat()
                         state.trail_long = long_sig.sl
+                        state.long_tp = long_sig.tp
                         state.long_be_reached = False
                         state.day_trades += 1
                         state.last_signal_time = time.time()
@@ -673,6 +793,18 @@ def main():
 
             # ── Heartbeat (toutes les 4h, pas entre 23h-6h) ──
             alerts.check_heartbeat(state.position, state.day_trades)
+
+            # ── Position update + proximite SL/TP ──
+            if state.position != "FLAT":
+                live_price = klines_4h[-2, 4]
+                alerts.check_position_update(
+                    state.position, state.entry_price, live_price,
+                    state.trail_long, state.long_tp, state.entry_time
+                )
+                alerts.check_sl_tp_proximity(
+                    state.position, state.entry_price, live_price,
+                    state.trail_long, state.long_tp
+                )
 
             # Log status
             if state.position != "FLAT":

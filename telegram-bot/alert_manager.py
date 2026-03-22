@@ -42,6 +42,11 @@ class AlertManager:
         self.last_st_dir_4h: Optional[float] = None
         self.last_st_dir_1d: Optional[float] = None
 
+        # Position updates
+        self.last_position_update: float = 0.0
+        self.last_sl_proximity_alert: float = 0.0
+        self.last_tp_proximity_alert: float = 0.0
+
     # ── Heartbeat ──
 
     def record_scan(self):
@@ -128,6 +133,108 @@ class AlertManager:
             f"\U0000231A {datetime.now(timezone.utc).strftime('%H:%M')} UTC"
         )
         self.send(text)
+
+    # ── Position update (toutes les heures) ──
+
+    POSITION_UPDATE_INTERVAL = 3600  # 1h
+
+    def check_position_update(self, position: str, entry_price: float,
+                              cur_price: float, trail_stop: float,
+                              tp: float, entry_time: str):
+        """Envoie un update PnL toutes les heures si en position."""
+        if position == "FLAT" or entry_price <= 0 or cur_price <= 0:
+            return
+
+        now = time.time()
+        if now - self.last_position_update < self.POSITION_UPDATE_INTERVAL:
+            return
+
+        # Pas la nuit
+        current_hour = datetime.now(timezone.utc).hour
+        if current_hour >= 23 or current_hour < 6:
+            return
+
+        self.last_position_update = now
+
+        if position == "LONG":
+            pnl_pct = (cur_price - entry_price) / entry_price * 100
+            sl_dist = (cur_price - trail_stop) / cur_price * 100 if trail_stop > 0 else 0
+            tp_dist = (tp - cur_price) / cur_price * 100 if tp > 0 else 0
+        else:  # SHORT
+            pnl_pct = (entry_price - cur_price) / entry_price * 100
+            sl_dist = 0  # short n'a pas de SL fixe
+            tp_dist = 0
+
+        pnl_emoji = "\U0001F7E2" if pnl_pct >= 0 else "\U0001F534"
+
+        lines = [
+            f"\U0001F4CA <b>Position Update</b> \u2014 {position}",
+            "",
+            f"{pnl_emoji} PnL: <code>{pnl_pct:+.2f}%</code>",
+            f"\U0001F4B2 Prix: <code>${cur_price:,.2f}</code>",
+            f"\U0001F4CD Entree: <code>${entry_price:,.2f}</code>",
+        ]
+
+        if position == "LONG":
+            if trail_stop > 0:
+                lines.append(f"\U0001F6E1 Trail SL: <code>${trail_stop:,.2f}</code> ({sl_dist:.1f}%)")
+            if tp > 0:
+                lines.append(f"\U0001F3AF TP: <code>${tp:,.2f}</code> ({tp_dist:+.1f}%)")
+
+        lines.append(f"\n\U0000231A {datetime.now(timezone.utc).strftime('%H:%M')} UTC")
+
+        self.send("\n".join(lines))
+        log.info("Position update: %s PnL=%.2f%%", position, pnl_pct)
+
+    # ── Alerte proximite SL / TP ──
+
+    SL_PROXIMITY_PCT = 1.5   # alerte si prix a moins de 1.5% du SL
+    TP_PROXIMITY_PCT = 2.0   # alerte si prix a moins de 2% du TP
+    PROXIMITY_COOLDOWN = 1800  # 30 min entre alertes proximite
+
+    def check_sl_tp_proximity(self, position: str, entry_price: float,
+                              cur_price: float, trail_stop: float, tp: float):
+        """Alerte quand le prix approche du SL ou du TP."""
+        if position == "FLAT" or cur_price <= 0:
+            return
+
+        now = time.time()
+
+        # ── Proximite SL (LONG seulement, car short n'a pas de SL fixe) ──
+        if position == "LONG" and trail_stop > 0:
+            sl_dist_pct = (cur_price - trail_stop) / cur_price * 100
+            if sl_dist_pct <= self.SL_PROXIMITY_PCT and sl_dist_pct > 0:
+                if now - self.last_sl_proximity_alert > self.PROXIMITY_COOLDOWN:
+                    self.last_sl_proximity_alert = now
+                    pnl_pct = (cur_price - entry_price) / entry_price * 100
+                    self.send(
+                        "\U0001F6A8 <b>ATTENTION \u2014 SL proche!</b>\n"
+                        "\n"
+                        f"\U0001F534 Prix: <code>${cur_price:,.2f}</code>\n"
+                        f"\U0001F6E1 Trail SL: <code>${trail_stop:,.2f}</code>\n"
+                        f"\U0001F4CF Distance: <code>{sl_dist_pct:.2f}%</code>\n"
+                        f"\U0001F4CA PnL actuel: <code>{pnl_pct:+.2f}%</code>\n"
+                        f"\n\U0000231A {datetime.now(timezone.utc).strftime('%H:%M')} UTC"
+                    )
+                    log.info("SL proximity alert: %.2f%% du SL", sl_dist_pct)
+
+        # ── Proximite TP (LONG seulement) ──
+        if position == "LONG" and tp > 0:
+            tp_dist_pct = (tp - cur_price) / cur_price * 100
+            if tp_dist_pct <= self.TP_PROXIMITY_PCT and tp_dist_pct > 0:
+                if now - self.last_tp_proximity_alert > self.PROXIMITY_COOLDOWN:
+                    self.last_tp_proximity_alert = now
+                    pnl_pct = (cur_price - entry_price) / entry_price * 100
+                    self.send(
+                        "\U0001F389 <b>TP presque atteint!</b>\n"
+                        "\n"
+                        f"\U0001F7E2 Prix: <code>${cur_price:,.2f}</code>\n"
+                        f"\U0001F3AF TP: <code>${tp:,.2f}</code>\n"
+                        f"\U0001F4CF Distance: <code>{tp_dist_pct:.2f}%</code>\n"
+                        f"\U0001F4CA PnL actuel: <code>{pnl_pct:+.2f}%</code>\n"
+                        f"\n\U0000231A {datetime.now(timezone.utc).strftime('%H:%M')} UTC"
+                    )
+                    log.info("TP proximity alert: %.2f%% du TP", tp_dist_pct)
 
     # ── SuperTrend flip ──
 
