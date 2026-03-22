@@ -89,26 +89,58 @@ def position():
 
 
 def send_status_reply(chat_id: str):
-    """Envoie le status actuel du scanner via Telegram."""
+    """Envoie le status enrichi : prix live, PnL flottant, position."""
     state = ScannerState.load()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+    # Fetch prix BTC live
+    try:
+        resp = requests.get("https://api.binance.com/api/v3/ticker/price",
+                            params={"symbol": "BTCUSDT"}, timeout=10)
+        btc_price = float(resp.json()["price"])
+    except Exception:
+        btc_price = 0
+
     if state.position == "FLAT":
-        pos_info = "FLAT (en attente de signal)"
+        pos_block = (
+            "\U0001F7E1 Position: <b>FLAT</b> (en attente)\n"
+            f"\U0001F4B2 BTC: <code>${btc_price:,.2f}</code>"
+        )
     elif state.position == "LONG":
-        pnl = f" | Trail: {state.trail_long:,.0f}" if state.trail_long else ""
-        pos_info = f"LONG @ {state.entry_price:,.2f}{pnl}"
-    else:
-        pos_info = f"SHORT @ {state.entry_price:,.2f} | Bars: {state.short_bars_in}"
+        if btc_price > 0 and state.entry_price > 0:
+            pnl_pct = (btc_price - state.entry_price) / state.entry_price * 100
+            pnl_emoji = "\U0001F7E2" if pnl_pct >= 0 else "\U0001F534"
+            sl_dist = (btc_price - state.trail_long) / btc_price * 100 if state.trail_long > 0 else 0
+            pos_block = (
+                f"\U0001F7E2 Position: <b>LONG</b> @ <code>${state.entry_price:,.2f}</code>\n"
+                f"\U0001F4B2 Prix: <code>${btc_price:,.2f}</code>\n"
+                f"{pnl_emoji} PnL: <code>{pnl_pct:+.2f}%</code>\n"
+                f"\U0001F6E1 Trail: <code>${state.trail_long:,.2f}</code> ({sl_dist:.1f}% du prix)"
+            )
+        else:
+            pos_block = f"\U0001F7E2 Position: <b>LONG</b> @ <code>${state.entry_price:,.2f}</code>"
+    else:  # SHORT
+        if btc_price > 0 and state.entry_price > 0:
+            pnl_pct = (state.entry_price - btc_price) / state.entry_price * 100
+            pnl_emoji = "\U0001F7E2" if pnl_pct >= 0 else "\U0001F534"
+            pos_block = (
+                f"\U0001F534 Position: <b>SHORT</b> @ <code>${state.entry_price:,.2f}</code>\n"
+                f"\U0001F4B2 Prix: <code>${btc_price:,.2f}</code>\n"
+                f"{pnl_emoji} PnL: <code>{pnl_pct:+.2f}%</code>\n"
+                f"\U0001F4CA Bars: {state.short_bars_in}"
+            )
+        else:
+            pos_block = f"\U0001F534 Position: <b>SHORT</b> @ <code>${state.entry_price:,.2f}</code>"
 
     text = (
-        "\U0001F4CA <b>Phantom Edge V11 — Status</b>\n"
+        "\U0001F4CA <b>Phantom Edge V11 \u2014 Status</b>\n"
         f"\n"
-        f"\U0001F534 Position: {pos_info}\n"
-        f"\U0001F4C8 Trades aujourd'hui: {state.day_trades}/3\n"
+        f"{pos_block}\n"
+        f"\n"
+        f"\U0001F4C8 Signaux aujourd'hui: {state.day_trades}/3\n"
         f"\U0000231A {now} UTC\n"
         f"\n"
-        f"\u2705 Scanner actif — scan toutes les 5 min"
+        f"\u2705 Scanner actif \u2014 scan toutes les 5 min"
     )
     try:
         requests.post(f"{TELEGRAM_API}/sendMessage", json={

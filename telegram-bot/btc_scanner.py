@@ -27,6 +27,8 @@ import numpy as np
 import requests
 from dotenv import load_dotenv
 
+from alert_manager import AlertManager
+
 load_dotenv()
 
 # ── Config ──
@@ -236,6 +238,10 @@ class ScannerState:
 
         # Dedup
         self.last_signal_time: float = 0
+
+        # Résumé quotidien
+        self.daily_summary_sent: bool = False
+        self.signals_today: list = []
 
     def save(self):
         STATE_FILE.write_text(json.dumps(self.__dict__, indent=2))
@@ -514,14 +520,53 @@ def format_exit_alert(direction: str, reason: str, entry: float) -> str:
 # BOUCLE PRINCIPALE
 # ══════════════════════════════════════════════════════════════════════════════
 
+def format_daily_summary(state: ScannerState) -> str:
+    """Resume du jour : signaux envoyes."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    signals = state.signals_today
+
+    if not signals:
+        return (
+            f"\U0001F4C5 <b>Resume du jour</b> \u2014 {today}\n"
+            "\n"
+            "Aucun signal aujourd'hui.\n"
+            f"\U0001F4C8 Position: {state.position}"
+        )
+
+    details = []
+    for s in signals:
+        emoji = "\U0001F7E2" if s["direction"] == "LONG" else "\U0001F534"
+        details.append(f"  {emoji} {s['direction']} @ {s['entry']:,.2f} ({s['tf']})")
+
+    pos_info = ""
+    if state.position != "FLAT":
+        pos_info = f"\n\U0001F4CB Position en cours: {state.position} @ {state.entry_price:,.2f}"
+
+    return (
+        f"\U0001F4C5 <b>Resume du jour</b> \u2014 {today}\n"
+        "\n"
+        f"\U0001F4CA {len(signals)} signal(s) envoye(s):\n"
+        + "\n".join(details)
+        + f"\n{pos_info}"
+    )
+
+
 def main():
-    logging.info("Phantom Edge V11 Scanner démarré — Scan toutes les %ds", SCAN_INTERVAL)
+    logging.info("Phantom Edge V11 Scanner demarr\u00e9 — Scan toutes les %ds", SCAN_INTERVAL)
+
+    # Alert Manager
+    alerts = AlertManager(send_fn=send_telegram)
+
     send_telegram(
         "\U0001F47B <b>Phantom Edge V11 Scanner</b>\n"
         "Scan toutes les 5 min sur Binance\n"
-        "\U0001F7E2 LONG: 4H (SuperTrend + EMA pullback)\n"
+        "\U0001F7E2 LONG: 4H + Daily (SuperTrend + EMA pullback)\n"
         "\U0001F534 SHORT: Daily (EMA cross + ADX)\n"
-        "Max 3 trades/jour"
+        "Max 3 trades/jour\n"
+        "\n"
+        "\U0001F49A Heartbeat toutes les 4h\n"
+        "\U0001F504 Alerte SuperTrend flip\n"
+        "\U0001F4C5 Resume du jour a 21h UTC"
     )
 
     state = ScannerState.load()
@@ -534,13 +579,27 @@ def main():
             if now.day != state.last_day:
                 state.day_trades = 0
                 state.last_day = now.day
-                logging.info("Nouveau jour — compteur trades reset")
+                state.daily_summary_sent = False
+                state.signals_today = []
+                logging.info("Nouveau jour \u2014 compteurs reset")
+
+            # Resume quotidien a 21h UTC
+            if now.hour >= 21 and not state.daily_summary_sent:
+                summary = format_daily_summary(state)
+                send_telegram(summary)
+                state.daily_summary_sent = True
+                logging.info("Resume quotidien envoye")
 
             can_trade = state.day_trades < MAX_DAILY
 
             # ── Fetch données ──
             klines_4h = fetch_klines(SYMBOL, "4h", limit=300)
             klines_1d = fetch_klines(SYMBOL, "1d", limit=300)
+
+            # ── SuperTrend flip detection ──
+            st_val_4h, st_dir_4h = supertrend(klines_4h[:, 2], klines_4h[:, 3], klines_4h[:, 4], ST_FACTOR, ST_PERIOD)
+            st_val_1d, st_dir_1d = supertrend(klines_1d[:, 2], klines_1d[:, 3], klines_1d[:, 4], ST_FACTOR, ST_PERIOD)
+            alerts.check_supertrend_flip(st_dir_4h[-2], st_dir_1d[-2], state.position)
 
             # ── Gestion de position existante ──
             if state.position == "LONG":
@@ -585,6 +644,7 @@ def main():
                         state.long_be_reached = False
                         state.day_trades += 1
                         state.last_signal_time = time.time()
+                        state.signals_today.append({"direction": "LONG", "entry": long_sig.entry, "tf": long_sig.timeframe})
                         logging.info("ALERTE LONG envoyée @ %.2f (%s)", long_sig.entry, long_sig.timeframe)
                         state.save()
 
@@ -604,8 +664,15 @@ def main():
                             state.short_bars_since = 0
                             state.day_trades += 1
                             state.last_signal_time = time.time()
+                            state.signals_today.append({"direction": "SHORT", "entry": short_sig.entry, "tf": "1D"})
                             logging.info("ALERTE SHORT envoyée @ %.2f", short_sig.entry)
                             state.save()
+
+            # ── Scan reussi ──
+            alerts.record_scan()
+
+            # ── Heartbeat (toutes les 4h, pas entre 23h-6h) ──
+            alerts.check_heartbeat(state.position, state.day_trades)
 
             # Log status
             if state.position != "FLAT":
@@ -618,16 +685,19 @@ def main():
                              state.position, state.entry_price, pnl,
                              state.trail_long if state.position == "LONG" else state.short_lowest)
             else:
-                logging.info("FLAT — Trades: %d/%d", state.day_trades, MAX_DAILY)
+                logging.info("FLAT \u2014 Trades: %d/%d", state.day_trades, MAX_DAILY)
 
             state.save()
 
         except requests.exceptions.RequestException as e:
-            logging.warning("Erreur réseau: %s — retry dans 30s", e)
+            logging.warning("Erreur r\u00e9seau: %s \u2014 retry dans 30s", e)
+            alerts.record_error("Reseau", str(e))
+            alerts.alert_connection_lost(str(e))
             time.sleep(30)
             continue
         except Exception as e:
             logging.error("Erreur inattendue: %s", e, exc_info=True)
+            alerts.record_error("Inattendue", str(e))
             time.sleep(30)
             continue
 
