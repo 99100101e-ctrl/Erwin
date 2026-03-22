@@ -40,6 +40,7 @@ from trade_tracker import (
     log_entry, log_exit, compute_stats, format_stats_telegram,
     format_daily_summary,
 )
+from alert_manager import AlertManager, AlertConfig
 
 load_dotenv()
 
@@ -196,6 +197,7 @@ class ScannerState:
         self.risk_pct: float = 0
         self.circuit_breaker: dict = {}
         self.daily_summary_sent: bool = False
+        self.alert_state: dict = {}
 
     def save(self):
         STATE_FILE.write_text(json.dumps(self.__dict__, indent=2))
@@ -536,6 +538,18 @@ def process_exit(state: ScannerState, cb: CircuitBreaker,
 
 def main():
     logging.info("Phantom Edge V14 Scanner demarr\u00e9 \u2014 Scan toutes les %ds", SCAN_INTERVAL)
+
+    # ── Alert Manager ──
+    alert_config = AlertConfig(
+        heartbeat_interval_hours=4.0,
+        drawdown_warn_pct=5.0,
+        drawdown_critical_pct=10.0,
+        max_consecutive_errors=3,
+        error_cooldown_seconds=300,
+        position_update_hours=2.0,
+    )
+    alerts = AlertManager(config=alert_config, send_fn=send_telegram)
+
     send_telegram(
         "\U0001F47B <b>Phantom Edge V14 Scanner</b>\n"
         "\n"
@@ -545,11 +559,12 @@ def main():
         "\U0001F4CA Filtre ADX (pas de trade en range)\n"
         "\U00002B50 Score de confiance par signal\n"
         "\U0001F4C8 Tracking complet + /stats\n"
+        "\U0001F49A Heartbeat + alertes temps r\u00e9el\n"
         f"\n"
         f"\U0001F4B5 Equity: ${INITIAL_EQUITY:,.0f}\n"
         f"Max {MAX_DAILY} trades/jour\n"
         "\n"
-        "<i>V14 = V13 + Risk Management + Tracking</i>"
+        "<i>V14 = V13 + Risk Management + Tracking + Alertes</i>"
     )
 
     state = ScannerState.load()
@@ -559,6 +574,10 @@ def main():
     cb = CircuitBreaker.from_dict(state.circuit_breaker, RISK_CONFIG)
     if state.equity > cb.peak_equity:
         cb.peak_equity = state.equity
+
+    # Restaurer l'etat des alertes si disponible
+    if hasattr(state, 'alert_state') and state.alert_state:
+        alerts.load_from_dict(state.alert_state)
 
     while True:
         try:
@@ -585,6 +604,8 @@ def main():
             cb_ok, cb_reason = cb.can_trade()
             if not cb_ok:
                 logging.info("Circuit breaker actif: %s", cb_reason)
+                # Heartbeat meme en pause
+                alerts.check_heartbeat(state.position, state.equity, state.day_trades)
                 state.circuit_breaker = cb.to_dict()
                 state.save()
                 time.sleep(SCAN_INTERVAL)
@@ -593,6 +614,11 @@ def main():
             # ── Fetch données ──
             klines_4h = fetch_klines(SYMBOL, "4h", limit=300)
             klines_1d = fetch_klines(SYMBOL, "1d", limit=300)
+
+            # ── SuperTrend flip detection ──
+            st_val_4h, st_dir_4h = supertrend(klines_4h[:, 2], klines_4h[:, 3], klines_4h[:, 4], ST_FACTOR, ST_PERIOD)
+            st_val_1d, st_dir_1d = supertrend(klines_1d[:, 2], klines_1d[:, 3], klines_1d[:, 4], ST_FACTOR, ST_PERIOD)
+            alerts.check_supertrend_flip(st_dir_4h[-2], st_dir_1d[-2], state.position)
 
             # ── Gestion de position existante ──
             if state.position == "LONG":
@@ -630,6 +656,7 @@ def main():
                     if long_sig.confidence.get("score", 0) < RISK_CONFIG.min_confidence:
                         logging.info("LONG rejet\u00e9: confiance %d/5 < %d",
                                      long_sig.confidence["score"], RISK_CONFIG.min_confidence)
+                        alerts.alert_signal_missed("LONG", f"Confiance {long_sig.confidence['score']}/5 < {RISK_CONFIG.min_confidence}")
                     else:
                         # V14 — Position sizing
                         pos = calculate_position_size(
@@ -662,6 +689,7 @@ def main():
                         if short_sig.confidence.get("score", 0) < RISK_CONFIG.min_confidence:
                             logging.info("SHORT rejet\u00e9: confiance %d/5 < %d",
                                          short_sig.confidence["score"], RISK_CONFIG.min_confidence)
+                            alerts.alert_signal_missed("SHORT", f"Confiance {short_sig.confidence['score']}/5 < {RISK_CONFIG.min_confidence}")
                         else:
                             pos = calculate_position_size(
                                 state.equity, short_sig.entry, short_sig.sl, RISK_CONFIG
@@ -686,9 +714,32 @@ def main():
                                              short_sig.entry, pos["position_usd"], pos["risk_pct"])
                                 state.save()
 
+            # ── Scan reussi ──
+            alerts.record_scan()
+
+            # ── Alertes periodiques ──
+            cur_price = klines_4h[-2, 4]
+
+            # Heartbeat
+            alerts.check_heartbeat(state.position, state.equity, state.day_trades)
+
+            # Drawdown
+            alerts.check_drawdown(state.equity, cb.peak_equity)
+
+            # Position live update
+            if state.position != "FLAT":
+                alerts.check_position_update(
+                    position=state.position,
+                    entry_price=state.entry_price,
+                    current_price=cur_price,
+                    equity=state.equity,
+                    trail_stop=state.trail_long,
+                    short_sl=state.short_sl,
+                    position_size_usd=state.position_size_usd,
+                )
+
             # Log status
             if state.position != "FLAT":
-                cur_price = klines_4h[-2, 4]
                 if state.position == "LONG":
                     pnl = (cur_price - state.entry_price) / state.entry_price * 100
                     trail_info = f"Trail: {state.trail_long:.2f}"
@@ -703,14 +754,18 @@ def main():
                              regime_4h.get("adx", "?") if "regime_4h" in dir() else "?")
 
             state.circuit_breaker = cb.to_dict()
+            state.alert_state = alerts.to_dict()
             state.save()
 
         except requests.exceptions.RequestException as e:
             logging.warning("Erreur r\u00e9seau: %s \u2014 retry dans 30s", e)
+            alerts.record_error("Reseau", str(e))
+            alerts.alert_connection_lost("Binance", str(e))
             time.sleep(30)
             continue
         except Exception as e:
             logging.error("Erreur inattendue: %s", e, exc_info=True)
+            alerts.record_error("Inattendue", str(e))
             time.sleep(30)
             continue
 

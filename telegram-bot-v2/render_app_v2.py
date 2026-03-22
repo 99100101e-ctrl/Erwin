@@ -24,6 +24,7 @@ from flask import Flask, jsonify
 from btc_scanner_v14 import main as scanner_main, ScannerState, STATE_FILE, INITIAL_EQUITY
 from trade_tracker import compute_stats, format_stats_telegram, format_daily_summary
 from risk_manager import RiskConfig, CircuitBreaker
+from alert_manager import AlertManager, AlertConfig, format_live_status
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -109,32 +110,24 @@ def send_reply(chat_id: str, text: str):
 
 def handle_status(chat_id: str):
     state = ScannerState.load()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Circuit breaker info
-    cb_info = ""
-    if state.circuit_breaker.get("is_paused"):
-        cb_info = f"\n\U0001F6A8 <b>PAUSE</b>: {state.circuit_breaker.get('pause_reason', '')}\n"
+    # Fetch prix BTC actuel pour PnL flottant
+    try:
+        resp = requests.get("https://api.binance.com/api/v3/ticker/price",
+                            params={"symbol": "BTCUSDT"}, timeout=10)
+        current_price = float(resp.json()["price"])
+    except Exception:
+        current_price = state.entry_price if state.entry_price > 0 else 0
 
-    if state.position == "FLAT":
-        pos_info = "FLAT (en attente de signal)"
-    elif state.position == "LONG":
-        pnl_info = f" | Trail: {state.trail_long:,.0f}" if state.trail_long else ""
-        pos_info = f"LONG @ {state.entry_price:,.2f}{pnl_info}"
-    else:
-        pos_info = f"SHORT @ {state.entry_price:,.2f} | SL: {state.short_sl:,.0f}"
+    # Peak equity pour drawdown
+    peak_equity = state.circuit_breaker.get("peak_equity", state.equity)
 
-    text = (
-        "\U0001F4CA <b>Phantom Edge V14 \u2014 Status</b>\n"
-        f"\n"
-        f"\U0001F534 Position: {pos_info}\n"
-        f"\U0001F4B5 Equity: <code>${state.equity:,.2f}</code>\n"
-        f"\U0001F4C8 Trades aujourd'hui: {state.day_trades}/3\n"
-        f"{cb_info}"
-        f"\U0000231A {now} UTC\n"
-        f"\n"
-        f"\u2705 Scanner actif \u2014 scan toutes les 5 min"
-    )
+    # Reconstruire l'AlertManager a partir du state
+    alert_mgr = AlertManager(config=AlertConfig())
+    if state.alert_state:
+        alert_mgr.load_from_dict(state.alert_state)
+
+    text = format_live_status(state, current_price, peak_equity, alert_mgr)
     send_reply(chat_id, text)
 
 
