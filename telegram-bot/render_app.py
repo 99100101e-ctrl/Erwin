@@ -152,8 +152,58 @@ def send_status_reply(chat_id: str):
         logging.error("Erreur envoi status: %s", e)
 
 
+def send_help_reply(chat_id: str):
+    """Envoie le memo des commandes disponibles."""
+    text = (
+        "\U0001F4D6 <b>Commandes disponibles</b>\n"
+        "\n"
+        "/status \u2014 Position actuelle, prix BTC live, PnL flottant\n"
+        "/help \u2014 Ce memo\n"
+        "\n"
+        "\U0001F514 <b>Alertes automatiques</b>\n"
+        "\n"
+        "\U0001F7E2\U0001F534 Signal LONG/SHORT avec score de confiance\n"
+        "\U0001F504 SuperTrend flip (4H + Daily)\n"
+        "\U0001F4CA Position update (toutes les 1h)\n"
+        "\U0001F6A8 Alerte SL proche (&lt;1.5%)\n"
+        "\U0001F389 Alerte TP proche (&lt;2%)\n"
+        "\u2705\u274C Fermeture position (SL/trail/BE/time stop)\n"
+        "\U0001F49A Heartbeat (toutes les 4h, 6h-23h)\n"
+        "\U0001F4C5 Resume du jour (21h UTC)\n"
+        "\U0001F6A8 Erreurs / connexion perdue\n"
+        "\n"
+        "\U0001F4A1 <i>Les alertes sont envoyees automatiquement, "
+        "pas besoin de les demander.</i>"
+    )
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }, timeout=10)
+    except Exception as e:
+        logging.error("Erreur envoi help: %s", e)
+
+
+def register_telegram_commands():
+    """Enregistre le menu de commandes dans Telegram (bouton / du clavier)."""
+    commands = [
+        {"command": "status", "description": "Position, prix BTC, PnL flottant"},
+        {"command": "help", "description": "Liste des commandes et alertes"},
+    ]
+    try:
+        resp = requests.post(f"{TELEGRAM_API}/setMyCommands",
+                             json={"commands": commands}, timeout=10)
+        if resp.ok:
+            logging.info("Menu Telegram enregistre (%d commandes)", len(commands))
+        else:
+            logging.warning("setMyCommands failed: %s", resp.text)
+    except Exception as e:
+        logging.warning("Erreur enregistrement commandes: %s", e)
+
+
 def poll_telegram_commands():
-    """Poll les messages Telegram pour répondre aux commandes /status."""
+    """Poll les messages Telegram pour repondre aux commandes."""
     last_update_id = 0
     while True:
         try:
@@ -169,6 +219,8 @@ def poll_telegram_commands():
                     chat_id = str(msg.get("chat", {}).get("id", ""))
                     if text in ("/status", "/start"):
                         send_status_reply(chat_id)
+                    elif text == "/help":
+                        send_help_reply(chat_id)
         except Exception as e:
             logging.warning("Poll Telegram error: %s", e)
             time.sleep(10)
@@ -180,7 +232,9 @@ def start_scanner():
     scanner_main()
 
 
-# Lancer le scanner + polling Telegram au démarrage
+# Enregistrer le menu de commandes + lancer scanner + polling
+register_telegram_commands()
+
 scanner_thread = threading.Thread(target=start_scanner, daemon=True)
 scanner_thread.start()
 
