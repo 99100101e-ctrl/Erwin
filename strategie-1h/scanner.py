@@ -137,7 +137,7 @@ def handle_telegram_commands(tracker, update_offset):
         if chat_id != cfg.TELEGRAM_CHAT_ID:
             continue
 
-        if text in ("/status", "/status@erwin_bot", "/status_1h"):
+        if text.startswith("/status"):
             try:
                 df = fetch_ohlcv(limit=300)
                 df = generate_signals(df)
