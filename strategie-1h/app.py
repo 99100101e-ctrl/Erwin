@@ -1,82 +1,75 @@
 """
-Erwin Strategy 1H — Point d'entree principal.
+Erwin Strategy 1H — Web Service + Scanner Telegram.
 
-Modes d'utilisation :
-  1. CLI : python app.py              → affiche le signal courant
-  2. API : uvicorn app:app --port 8000 → endpoint JSON /signal
+Le scanner tourne dans un thread d'arriere-plan au demarrage.
+Le Web Service expose /health et /signal pour garder le service actif.
+
+Deploiement Render :
+  Build  : pip install -r requirements.txt
+  Start  : uvicorn app:app --host 0.0.0.0 --port $PORT
 """
 
-import json
-import sys
+import os
+import threading
 
-# ── Mode CLI ──────────────────────────────────────────────────
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-def run_cli():
-    from signals.data_feed import fetch_ohlcv
-    from signals.strategy import generate_signals, get_latest_signal
+from signals.data_feed import fetch_ohlcv
+from signals.strategy import generate_signals, get_latest_signal
+from signals import config as cfg
 
-    print("Erwin Strategy 1H — Analyse en cours...")
-    df = fetch_ohlcv(limit=300)
+# ── FastAPI ──────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Erwin Strategy 1H",
+    description="Signaux d'achat/vente BTC bases sur Ichimoku + ADX + filtres",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "strategy": "Erwin 1H"}
+
+
+@app.get("/signal")
+def signal(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 300):
+    """Retourne le signal courant et le dashboard."""
+    df = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
     df = generate_signals(df)
-    result = get_latest_signal(df)
+    return get_latest_signal(df)
 
-    print(json.dumps(result, indent=2, default=str))
 
-    sig = result["signal"]
-    if sig:
-        print(f"\n>>> SIGNAL {sig} detecte <<<")
-        if result["sl"]:
-            print(f"    Stop-Loss : {result['sl']:.2f}")
-        if result["tp"]:
-            print(f"    Take-Profit : {result['tp']:.2f}")
+# ── Scanner en arriere-plan ──────────────────────────────────
+
+def start_scanner_thread():
+    """Lance le scanner dans un thread daemon."""
+    from scanner import run_scanner
+    thread = threading.Thread(target=run_scanner, daemon=True)
+    thread.start()
+    print("[APP] Scanner Telegram demarre en arriere-plan.")
+
+
+@app.on_event("startup")
+def on_startup():
+    """Au demarrage du Web Service, lance le scanner Telegram."""
+    if cfg.TELEGRAM_TOKEN and cfg.TELEGRAM_CHAT_ID:
+        start_scanner_thread()
     else:
-        print(f"\nPas de signal. Marche : {result['market_state']} | Score bull : {result['score_bull']}/9")
-
-    return result
+        print("[APP] TELEGRAM_TOKEN / TELEGRAM_CHAT_ID manquants — scanner non demarre.")
 
 
-# ── Mode API (FastAPI) ────────────────────────────────────────
-
-def create_app():
-    """Cree l'application FastAPI (importee par uvicorn)."""
-    try:
-        from fastapi import FastAPI
-        from fastapi.middleware.cors import CORSMiddleware
-    except ImportError:
-        return None
-
-    from signals.data_feed import fetch_ohlcv
-    from signals.strategy import generate_signals, get_latest_signal
-
-    api = FastAPI(
-        title="Erwin Strategy 1H",
-        description="Signaux d'achat/vente BTC bases sur Ichimoku + ADX + filtres",
-        version="1.0.0",
-    )
-
-    api.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET"],
-        allow_headers=["*"],
-    )
-
-    @api.get("/signal")
-    def signal(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 300):
-        """Retourne le signal courant et le dashboard."""
-        df = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
-        df = generate_signals(df)
-        return get_latest_signal(df)
-
-    @api.get("/health")
-    def health():
-        return {"status": "ok", "strategy": "Erwin 1H"}
-
-    return api
-
-
-# FastAPI auto-detection pour uvicorn
-app = create_app()
+# ── Mode CLI ─────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    run_cli()
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
