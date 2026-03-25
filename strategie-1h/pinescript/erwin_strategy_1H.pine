@@ -1,0 +1,278 @@
+//@version=5
+strategy("24.03 17h [Erwin]",
+         shorttitle        = "24.03 17h",
+         overlay           = true,
+         initial_capital   = 10000,
+         default_qty_type  = strategy.percent_of_equity,
+         default_qty_value = 100,
+         commission_type   = strategy.commission.percent,
+         commission_value  = 0.1,
+         slippage          = 2)
+// ═══════════════════════════════════════════════════════════════
+//  PARAMETRES ICHIMOKU
+// ═══════════════════════════════════════════════════════════════
+grp1 = "Kijun / Tenkan / Chikou"
+kijun_len    = input.int(26, "Kijun-sen",          group=grp1)
+tenkan_len   = input.int(9,  "Tenkan-sen",         group=grp1)
+displacement = input.int(26, "Chikou Deplacement", group=grp1)
+// ═══════════════════════════════════════════════════════════════
+//  METHODE DETECTION FLAT — 3 CHOIX
+// ═══════════════════════════════════════════════════════════════
+grp2 = "Detection FLAT / RANGE  ← changer ici pour tester"
+flat_mode = input.string("ADX seul",
+             title   = "Methode de detection flat",
+             options = ["ADX seul", "Bollinger Width", "ADX + ATR combine"],
+             group   = grp2)
+// ADX
+adx_len   = input.int(14, "ADX - Periode",              group=grp2)
+adx_trend = input.int(22, "ADX - Seuil tendance (>X)",  group=grp2, minval=10, maxval=50)
+adx_flat  = input.int(18, "ADX - Seuil flat (<X)",      group=grp2, minval=5,  maxval=30)
+// Bollinger Width
+bb_len    = input.int(20,   "BB Width - Periode",        group=grp2)
+bb_mult   = input.float(2.0,"BB Width - Ecart type",     group=grp2, step=0.1)
+bb_thresh = input.float(0.05,"BB Width - Seuil etroit (flat si <X)", group=grp2, step=0.01)
+// ATR combine
+atr_len   = input.int(14,   "ATR - Periode",             group=grp2)
+atr_ratio = input.float(0.8,"ATR - Ratio (flat si ATR < X * moy)", group=grp2, step=0.05)
+// ═══════════════════════════════════════════════════════════════
+//  FILTRES SUPPLEMENTAIRES
+// ═══════════════════════════════════════════════════════════════
+grp3 = "Filtres"
+use_ema  = input.bool(true, "EMA macro",        group=grp3)
+ema_len  = input.int(200,   "  Periode EMA",    group=grp3)
+use_rsi  = input.bool(true, "RSI",              group=grp3)
+rsi_len  = input.int(14,    "  Periode RSI",    group=grp3)
+rsi_ob   = input.int(65,    "  Overbought",     group=grp3)
+rsi_os   = input.int(35,    "  Oversold",       group=grp3)
+use_vol  = input.bool(true, "Volume > moyenne", group=grp3)
+vol_len  = input.int(20,    "  Periode volume", group=grp3)
+// ═══════════════════════════════════════════════════════════════
+//  GESTION DU TRADE
+// ═══════════════════════════════════════════════════════════════
+grp4 = "Gestion trade"
+use_partial    = input.bool(false, "Inclure signaux partiels (triangle ?)",  group=grp4)
+exclude_flat   = input.bool(true,  "Exclure entrees en zone FLAT",           group=grp4)
+use_sl         = input.bool(true,  "Stop Loss fixe (% du prix)",             group=grp4)
+sl_pct         = input.float(2.0,  "  Stop Loss %",                          group=grp4, step=0.5)
+use_trailing   = input.bool(false, "Stop Loss suiveur (trailing)",           group=grp4)
+trail_pct      = input.float(1.5,  "  Trailing Stop %",                      group=grp4, step=0.25)
+trail_offset   = input.float(0.5,  "  Activation apres gain % (offset)",     group=grp4, step=0.25)
+use_tp         = input.bool(true,  "Take Profit (% du prix)",                group=grp4)
+tp_pct         = input.float(4.0,  "  Take Profit %",                        group=grp4, step=0.5)
+// ═══════════════════════════════════════════════════════════════
+//  AFFICHAGE
+// ═══════════════════════════════════════════════════════════════
+grp5 = "Affichage"
+show_bg   = input.bool(true, "Fond couleur etat marche", group=grp5)
+bull_col  = input.color(color.new(#00C896, 0), "Bull", group=grp5)
+bear_col  = input.color(color.new(#FF4560, 0), "Bear", group=grp5)
+// ═══════════════════════════════════════════════════════════════
+//  CALCULS ICHIMOKU
+// ═══════════════════════════════════════════════════════════════
+donchian(len) =>
+    math.avg(ta.highest(high, len), ta.lowest(low, len))
+kijun  = donchian(kijun_len)
+tenkan = donchian(tenkan_len)
+// ═══════════════════════════════════════════════════════════════
+//  CALCUL ADX
+// ═══════════════════════════════════════════════════════════════
+up_move  = high - high[1]
+dn_move  = low[1] - low
+plus_dm  = up_move > dn_move and up_move > 0 ? up_move : 0.0
+minus_dm = dn_move > up_move and dn_move > 0 ? dn_move : 0.0
+tr_val   = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+atr_adx  = ta.rma(tr_val, adx_len)
+plus_di  = 100 * ta.rma(plus_dm, adx_len) / atr_adx
+minus_di = 100 * ta.rma(minus_dm, adx_len) / atr_adx
+dx       = 100 * math.abs(plus_di - minus_di) / (plus_di + minus_di)
+adx_val  = ta.rma(dx, adx_len)
+di_bull  = plus_di > minus_di
+di_bear  = minus_di > plus_di
+// ═══════════════════════════════════════════════════════════════
+//  CALCUL BOLLINGER WIDTH
+// ═══════════════════════════════════════════════════════════════
+bb_basis = ta.sma(close, bb_len)
+bb_dev   = bb_mult * ta.stdev(close, bb_len)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+bb_width = (bb_upper - bb_lower) / bb_basis   // normalise en %
+// ═══════════════════════════════════════════════════════════════
+//  CALCUL ATR RELATIF
+// ═══════════════════════════════════════════════════════════════
+atr_val  = ta.atr(atr_len)
+atr_ma   = ta.sma(atr_val, atr_len * 2)
+// ═══════════════════════════════════════════════════════════════
+//  DETECTION FLAT SELON LA METHODE CHOISIE
+// ═══════════════════════════════════════════════════════════════
+var bool is_flat     = false
+var bool is_trending = false
+if flat_mode == "ADX seul"
+    is_flat     := adx_val < adx_flat
+    is_trending := adx_val >= adx_trend
+else if flat_mode == "Bollinger Width"
+    is_flat     := bb_width < bb_thresh
+    is_trending := bb_width >= bb_thresh * 1.5
+else  // ADX + ATR combine
+    adx_ok      = adx_val >= adx_trend
+    atr_ok      = atr_val >= atr_ma * atr_ratio
+    is_flat     := not adx_ok and not atr_ok
+    is_trending := adx_ok and atr_ok
+// ═══════════════════════════════════════════════════════════════
+//  FILTRES SUPPLEMENTAIRES
+// ═══════════════════════════════════════════════════════════════
+ema200   = ta.ema(close, ema_len)
+rsi_val  = ta.rsi(close, rsi_len)
+vol_ma   = ta.sma(volume, vol_len)
+f_ema_bull = use_ema ? close > ema200 : true
+f_ema_bear = use_ema ? close < ema200 : true
+f_rsi_bull = use_rsi ? rsi_val < rsi_ob : true
+f_rsi_bear = use_rsi ? rsi_val > rsi_os : true
+f_vol      = use_vol ? volume > vol_ma  : true
+// ═══════════════════════════════════════════════════════════════
+//  CONDITIONS DE SIGNAL
+// ═══════════════════════════════════════════════════════════════
+tk_bull           = ta.crossover(tenkan, kijun)
+tk_bear           = ta.crossunder(tenkan, kijun)
+price_above_kijun = close > kijun
+price_below_kijun = close < kijun
+chikou_bull       = close > close[displacement]
+chikou_bear       = close < close[displacement]
+base_bull   = tk_bull and price_above_kijun and chikou_bull
+base_bear   = tk_bear and price_below_kijun and chikou_bear
+signal_bull = base_bull and is_trending and di_bull and f_ema_bull and f_rsi_bull and f_vol
+signal_bear = base_bear and is_trending and di_bear and f_ema_bear and f_rsi_bear and f_vol
+// Signal partiel = 3 conditions core OK mais filtres incomplets
+partial_bull = base_bull and not signal_bull
+partial_bear = base_bear and not signal_bear
+// Signal d'entree final selon le mode choisi
+// Option exclure flat : bloque toute entree si le marche est en range
+no_flat_ok  = exclude_flat ? not is_flat : true
+entry_bull  = (use_partial ? (signal_bull or partial_bull) : signal_bull) and no_flat_ok
+entry_bear  = (use_partial ? (signal_bear or partial_bear) : signal_bear) and no_flat_ok
+// ═══════════════════════════════════════════════════════════════
+//  ENTREES / SORTIES STRATEGY
+// ═══════════════════════════════════════════════════════════════
+sl_bull      = close * (1 - sl_pct   / 100)
+tp_bull      = close * (1 + tp_pct   / 100)
+sl_bear      = close * (1 + sl_pct   / 100)
+tp_bear      = close * (1 - tp_pct   / 100)
+// Trailing stop : en points (Pine attend une valeur absolue)
+trail_pts_bull = close * trail_pct   / 100
+trail_off_bull = close * trail_offset / 100
+trail_pts_bear = close * trail_pct   / 100
+trail_off_bear = close * trail_offset / 100
+if entry_bull and strategy.position_size <= 0
+    strategy.entry("LONG", strategy.long)
+    if use_trailing and use_tp
+        strategy.exit("Exit Long", "LONG", limit=tp_bull, trail_points=trail_pts_bull, trail_offset=trail_off_bull)
+    else if use_trailing
+        strategy.exit("Exit Long", "LONG", trail_points=trail_pts_bull, trail_offset=trail_off_bull)
+    else if use_sl and use_tp
+        strategy.exit("Exit Long", "LONG", stop=sl_bull, limit=tp_bull)
+    else if use_sl
+        strategy.exit("Exit Long", "LONG", stop=sl_bull)
+    else if use_tp
+        strategy.exit("Exit Long", "LONG", limit=tp_bull)
+if entry_bear and strategy.position_size >= 0
+    strategy.entry("SHORT", strategy.short)
+    if use_trailing and use_tp
+        strategy.exit("Exit Short", "SHORT", limit=tp_bear, trail_points=trail_pts_bear, trail_offset=trail_off_bear)
+    else if use_trailing
+        strategy.exit("Exit Short", "SHORT", trail_points=trail_pts_bear, trail_offset=trail_off_bear)
+    else if use_sl and use_tp
+        strategy.exit("Exit Short", "SHORT", stop=sl_bear, limit=tp_bear)
+    else if use_sl
+        strategy.exit("Exit Short", "SHORT", stop=sl_bear)
+    else if use_tp
+        strategy.exit("Exit Short", "SHORT", limit=tp_bear)
+// ═══════════════════════════════════════════════════════════════
+//  TRACE
+// ═══════════════════════════════════════════════════════════════
+plot(kijun,  "Kijun-sen",  color=color.new(#FF9800, 0), linewidth=2)
+plot(tenkan, "Tenkan-sen", color=color.new(#2196F3, 0), linewidth=1)
+plot(close,  "Chikou",     color=color.new(#CE93D8, 50), linewidth=1, offset=-displacement)
+plot(use_ema ? ema200 : na, "EMA 200", color=color.new(#FFEB3B, 40), linewidth=1)
+// Fond selon etat marche
+color bg_flat = color.new(#546E7A, 70)
+color bg_bull = color.new(#00E676, 78)
+color bg_bear = color.new(#FF1744, 78)
+bgcolor(show_bg and is_flat                 ? bg_flat : na, title="BG Flat")
+bgcolor(show_bg and is_trending and di_bull ? bg_bull : na, title="BG Bull")
+bgcolor(show_bg and is_trending and di_bear ? bg_bear : na, title="BG Bear")
+// Signaux visuels
+plotshape(signal_bull, title="LONG",  location=location.belowbar, style=shape.arrowup,   color=bull_col, size=size.large, text="LONG",  textcolor=color.white)
+plotshape(signal_bear, title="SHORT", location=location.abovebar, style=shape.arrowdown, color=bear_col, size=size.large, text="SHORT", textcolor=color.white)
+// Triangle partiel — couleur pleine si inclus dans le backtest, transparente sinon
+color tri_bull_col = use_partial ? color.new(#00E676,  0) : color.new(#00E676, 20)
+color tri_bear_col = use_partial ? color.new(#FF1744,  0) : color.new(#FF1744, 20)
+plotshape(partial_bull, title="Partiel Bull", location=location.belowbar, style=shape.triangleup,   color=tri_bull_col, size=size.small, text="?", textcolor=color.new(#00E676, 0))
+plotshape(partial_bear, title="Partiel Bear", location=location.abovebar, style=shape.triangledown, color=tri_bear_col, size=size.small, text="?", textcolor=color.new(#FF1744, 0))
+barcolor(entry_bull ? bull_col : entry_bear ? bear_col : na)
+// Fonction utilitaire dashboard (doit etre au niveau global)
+s(v) => v ? "OK  " : "--  "
+// Label mode actif + Dashboard complet
+partial_txt  = use_partial   ? " + partiels"   : " complets seul."
+flat_txt     = exclude_flat  ? " | no-flat"    : " | flat OK"
+trailing_txt = use_trailing  ? " | trailing"   : " | SL fixe"
+if barstate.islast
+    // Etat conditions en temps reel
+    db_tk    = tenkan > kijun
+    db_price = close > kijun
+    db_chi   = close > close[displacement]
+    db_trend = is_trending
+    db_dibull = di_bull
+    db_ema   = use_ema ? close > ema200 : true
+    db_vol   = use_vol ? volume > vol_ma : true
+    db_rsi   = use_rsi ? rsi_val < rsi_ob : true
+    db_flat  = not is_flat
+    bull_ct = (db_tk?1:0) + (db_price?1:0) + (db_chi?1:0) + (db_trend?1:0) + (db_dibull?1:0) + (db_ema?1:0) + (db_vol?1:0) + (db_rsi?1:0) + (db_flat?1:0)
+    var string mkt = "TRANSITION"
+    if is_flat
+        mkt := "RANGE / FLAT"
+    else if is_trending and di_bull
+        mkt := "TENDANCE BULL"
+    else if is_trending and di_bear
+        mkt := "TENDANCE BEAR"
+    else
+        mkt := "TRANSITION"
+    var color dash_col = color.new(#546E7A, 10)
+    if is_trending and di_bull
+        dash_col := color.new(#00C896, 10)
+    else if is_trending and di_bear
+        dash_col := color.new(#FF4560, 10)
+    else
+        dash_col := color.new(#546E7A, 10)
+    adx_str   = str.tostring(math.round(adx_val, 1))
+    rsi_str   = str.tostring(math.round(rsi_val, 1))
+    bull_str  = str.tostring(bull_ct)
+    bbw_str   = str.tostring(math.round(bb_width * 100, 2))
+    atr_str   = str.tostring(math.round(atr_val, 2))
+    l1  = "====== KT-PRO DASHBOARD ======\n"
+    l2  = "Marche  : " + mkt + "\n"
+    l3  = "Mode    : " + flat_mode + "\n"
+    l4  = "Signaux : " + partial_txt + flat_txt + "\n"
+    l5  = "Stop    : " + trailing_txt + "\n"
+    l6  = "--------- Conditions ---------\n"
+    l7  = s(db_tk)     + "TK Cross / Tenkan > Kijun\n"
+    l8  = s(db_price)  + "Prix > Kijun\n"
+    l9  = s(db_chi)    + "Chikou > Prix -26\n"
+    l10 = s(db_trend)  + "Tendance (ADX " + adx_str + ")\n"
+    l11 = s(db_dibull) + "DI+ > DI-\n"
+    l12 = s(db_ema)    + "EMA " + str.tostring(ema_len) + "\n"
+    l13 = s(db_vol)    + "Volume > Moy." + str.tostring(vol_len) + "\n"
+    l14 = s(db_rsi)    + "RSI " + rsi_str + " (< " + str.tostring(rsi_ob) + ")\n"
+    l15 = s(db_flat)   + "Hors zone FLAT\n"
+    l16 = "--------- Indicateurs --------\n"
+    l17 = "BB Width : " + bbw_str + "%  (seuil " + str.tostring(bb_thresh * 100) + "%)\n"
+    l18 = "ATR      : " + atr_str + "\n"
+    l19 = "------------------------------\n"
+    l20 = "Score Bull : " + bull_str + " / 9"
+    full = l1+l2+l3+l4+l5+l6+l7+l8+l9+l10+l11+l12+l13+l14+l15+l16+l17+l18+l19+l20
+    label.new(bar_index + 2, high,
+              text      = full,
+              xloc      = xloc.bar_index,
+              yloc      = yloc.price,
+              color     = dash_col,
+              textcolor = color.white,
+              style     = label.style_label_left,
+              size      = size.normal)
