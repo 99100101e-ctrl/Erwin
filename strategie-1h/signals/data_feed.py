@@ -1,6 +1,7 @@
 """
 Recuperation des donnees OHLCV via l'API publique Binance.
 Aucune cle API requise pour les donnees de marche publiques.
+Utilise plusieurs endpoints en fallback (api.binance.com bloque dans certaines regions).
 """
 
 import pandas as pd
@@ -8,7 +9,14 @@ import requests
 from . import config as cfg
 
 
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_ENDPOINTS = [
+    "https://api.binance.com/api/v3/klines",
+    "https://api1.binance.com/api/v3/klines",
+    "https://api2.binance.com/api/v3/klines",
+    "https://api3.binance.com/api/v3/klines",
+    "https://api4.binance.com/api/v3/klines",
+    "https://data-api.binance.vision/api/v3/klines",
+]
 
 TIMEFRAME_MAP = {
     "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
@@ -24,6 +32,7 @@ def fetch_ohlcv(
 ) -> pd.DataFrame:
     """
     Recupere les dernieres bougies OHLCV depuis Binance.
+    Essaie plusieurs endpoints en cas de blocage geographique.
 
     Retourne un DataFrame avec colonnes :
         open, high, low, close, volume
@@ -38,9 +47,18 @@ def fetch_ohlcv(
         "limit": limit,
     }
 
-    resp = requests.get(BINANCE_KLINES_URL, params=params, timeout=10)
-    resp.raise_for_status()
-    raw = resp.json()
+    last_error = None
+    for url in BINANCE_ENDPOINTS:
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            raw = resp.json()
+            break
+        except requests.RequestException as e:
+            last_error = e
+            continue
+    else:
+        raise ConnectionError(f"Impossible de se connecter a Binance (tous les endpoints ont echoue). Derniere erreur : {last_error}")
 
     df = pd.DataFrame(raw, columns=[
         "open_time", "open", "high", "low", "close", "volume",
