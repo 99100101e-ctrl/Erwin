@@ -9,6 +9,15 @@ import requests
 from . import config as cfg
 
 
+def escape_html(text: str) -> str:
+    """Echappe les caracteres speciaux HTML pour Telegram."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def send_telegram(message: str) -> bool:
     """Envoie un message Telegram. Retourne True si succes."""
     if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT_ID:
@@ -37,7 +46,7 @@ def format_conditions(conditions: list) -> str:
     lines = []
     for c in conditions:
         icon = "\u2705" if c["ok"] else "\u274C"
-        lines.append(f"{icon} {c['nom']}")
+        lines.append(f"{icon} {escape_html(c['nom'])}")
     return "\n".join(lines)
 
 
@@ -95,7 +104,7 @@ def format_exit_alert(direction: str, close_price: float, reason: str, entry_pri
         if direction == "SHORT":
             pnl_pct = -pnl_pct
         pnl_emoji = "\u2705" if pnl_pct > 0 else "\u274C"
-        lines.append(f"{pnl_emoji} <b>P&L :</b> {pnl_pct:+.2f}%")
+        lines.append(f"{pnl_emoji} <b>P&amp;L :</b> {pnl_pct:+.2f}%")
 
     lines += [
         f"",
@@ -128,7 +137,7 @@ def format_status(result: dict, tracker=None) -> str:
             f"  Entree : {tracker.entry_price:.2f}",
             f"  SL : {tracker.sl:.2f}" if tracker.sl else "",
             f"  TP : {tracker.tp:.2f}" if tracker.tp else "",
-            f"  {pnl_emoji} P&L latent : {pnl_pct:+.2f}%",
+            f"  {pnl_emoji} P&amp;L latent : {pnl_pct:+.2f}%",
             f"",
         ]
     else:
@@ -184,7 +193,7 @@ def format_daily_summary(result: dict, daily_stats: dict) -> str:
     total_pnl = sum(t["pnl_pct"] for t in daily_stats["trades"]) if daily_stats["trades"] else 0
     lines += [
         f"",
-        f"<b>P&L total du jour : {total_pnl:+.2f}%</b>",
+        f"<b>P&amp;L total du jour : {total_pnl:+.2f}%</b>",
         f"",
         f"<b>--- Conditions actuelles ({result['score_bull']}/9) ---</b>",
         format_conditions(result["conditions"]),
