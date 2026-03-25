@@ -180,6 +180,20 @@ def get_latest_signal(df: pd.DataFrame) -> dict:
     Pratique pour un endpoint API ou un webhook.
     """
     last = df.iloc[-1]
+
+    # Detail des 9 conditions pour le dashboard
+    conditions_detail = [
+        {"nom": "TK Cross (Tenkan > Kijun)", "ok": bool(last["tenkan"] > last["kijun"])},
+        {"nom": "Prix > Kijun", "ok": bool(last["close"] > last["kijun"])},
+        {"nom": "Chikou > Prix -26", "ok": bool(last["close"] > df["close"].iloc[-cfg.DISPLACEMENT - 1]) if len(df) > cfg.DISPLACEMENT else False},
+        {"nom": f"Tendance (ADX {round(float(last['adx']), 1)})", "ok": bool(last["is_trending"])},
+        {"nom": "DI+ > DI-", "ok": bool(last["di_bull"])},
+        {"nom": f"EMA {cfg.EMA_LEN}", "ok": bool(last["close"] > last["ema200"]) if cfg.USE_EMA else True},
+        {"nom": f"Volume > Moy.{cfg.VOL_LEN}", "ok": bool(last["volume"] > df["volume"].rolling(cfg.VOL_LEN).mean().iloc[-1]) if cfg.USE_VOL else True},
+        {"nom": f"RSI {round(float(last['rsi']), 1)} (< {cfg.RSI_OB})", "ok": bool(last["rsi"] < cfg.RSI_OB) if cfg.USE_RSI else True},
+        {"nom": "Hors zone FLAT", "ok": not bool(last["is_flat"])},
+    ]
+
     return {
         "timestamp": str(last.name),
         "close": float(last["close"]),
@@ -190,6 +204,7 @@ def get_latest_signal(df: pd.DataFrame) -> dict:
         "adx": round(float(last["adx"]), 2),
         "rsi": round(float(last["rsi"]), 2),
         "atr": round(float(last["atr"]), 4),
+        "bb_width": round(float(last["bb_width"]) * 100, 2),
         "is_flat": bool(last["is_flat"]),
         "is_trending": bool(last["is_trending"]),
         "di_bull": bool(last["di_bull"]),
@@ -198,4 +213,5 @@ def get_latest_signal(df: pd.DataFrame) -> dict:
         "ema200": round(float(last["ema200"]), 2),
         "sl": last["sl"],
         "tp": last["tp"],
+        "conditions": conditions_detail,
     }
