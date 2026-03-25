@@ -61,3 +61,16 @@ TP_PCT = 4.0
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "1h"
 EXCHANGE = "binance"
+
+# ═══════════════════════════════════════════════════════════════
+#  TELEGRAM
+# ═══════════════════════════════════════════════════════════════
+# 1. Creer un bot via @BotFather sur Telegram → recuperer le token
+# 2. Demarrer une conversation avec le bot, puis trouver le chat_id
+#    via https://api.telegram.org/bot<TOKEN>/getUpdates
+import os
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# Intervalle de scan en secondes (3600 = toutes les heures)
+SCAN_INTERVAL = 3600
