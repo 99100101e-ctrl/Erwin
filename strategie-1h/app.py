@@ -13,6 +13,7 @@ import os
 import threading
 
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from signals.data_feed import fetch_ohlcv
@@ -35,9 +36,9 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
+@app.get("/health", response_class=PlainTextResponse)
 def health():
-    return {"status": "ok", "strategy": "Erwin 1H"}
+    return "OK"
 
 
 @app.get("/signal")
