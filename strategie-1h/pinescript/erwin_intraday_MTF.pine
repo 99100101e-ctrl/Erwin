@@ -1,0 +1,404 @@
+//@version=5
+strategy("Erwin Intraday MTF [3 Modes]",
+         shorttitle        = "Erwin Intra",
+         overlay           = true,
+         initial_capital   = 10000,
+         default_qty_type  = strategy.percent_of_equity,
+         default_qty_value = 100,
+         commission_type   = strategy.commission.percent,
+         commission_value  = 0.075,
+         slippage          = 1,
+         calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════
+//  MODE DE STRATEGIE
+// ═══════════════════════════════════════════════════════════════
+grp0 = "Mode Strategie"
+use_modeA    = input.bool(true,  "Mode A : Squeeze Breakout",      group=grp0)
+use_modeB    = input.bool(false, "Mode B : Structure + Pullback",   group=grp0)
+use_modeC    = input.bool(false, "Mode C : Hybrid Momentum",        group=grp0)
+confluence   = input.int(1, "Confluence minimum (1=un seul suffit, 2=deux doivent confirmer, 3=les trois)",
+                 minval=1, maxval=3, group=grp0)
+htf          = input.timeframe("15", "Timeframe superieur (direction)", group=grp0)
+
+// ═══════════════════════════════════════════════════════════════
+//  PARAMETRES MODE A — SQUEEZE BREAKOUT
+// ═══════════════════════════════════════════════════════════════
+grpA = "Mode A — Squeeze Breakout"
+a_bb_len     = input.int(20,    "BB Periode",          group=grpA)
+a_bb_mult    = input.float(2.0, "BB Ecart-type",       group=grpA, step=0.1)
+a_kc_len     = input.int(20,    "Keltner Periode",     group=grpA)
+a_kc_mult    = input.float(1.5, "Keltner Multiplicateur", group=grpA, step=0.1)
+a_mom_len    = input.int(12,    "Momentum Periode",    group=grpA)
+a_squeeze_bars = input.int(6,   "Squeeze min barres",  group=grpA, minval=2)
+
+// ═══════════════════════════════════════════════════════════════
+//  PARAMETRES MODE B — STRUCTURE + PULLBACK
+// ═══════════════════════════════════════════════════════════════
+grpB = "Mode B — Structure + Pullback"
+b_swing_len  = input.int(5,     "Swing detection (barres)", group=grpB, minval=2)
+b_hma_len    = input.int(21,    "HMA Periode",             group=grpB)
+b_pullback   = input.float(0.3, "Pullback profondeur ATR", group=grpB, step=0.1)
+b_struct_bars = input.int(50,   "Structure lookback",      group=grpB)
+
+// ═══════════════════════════════════════════════════════════════
+//  PARAMETRES MODE C — HYBRID MOMENTUM
+// ═══════════════════════════════════════════════════════════════
+grpC = "Mode C — Hybrid Momentum"
+c_macd_fast  = input.int(8,     "MACD Fast",          group=grpC)
+c_macd_slow  = input.int(21,    "MACD Slow",          group=grpC)
+c_macd_sig   = input.int(5,     "MACD Signal",        group=grpC)
+c_vol_spike  = input.float(1.8, "Volume spike (x moy)", group=grpC, step=0.1)
+c_engulf_atr = input.float(0.5, "Taille bougie min (x ATR)", group=grpC, step=0.1)
+
+// ═══════════════════════════════════════════════════════════════
+//  FILTRES COMMUNS (15min)
+// ═══════════════════════════════════════════════════════════════
+grpF = "Filtres communs (HTF)"
+f_st_period  = input.int(10,    "Supertrend Periode",     group=grpF)
+f_st_mult    = input.float(3.0, "Supertrend Multiplicateur", group=grpF, step=0.1)
+f_use_vwap   = input.bool(true, "Filtre VWAP",            group=grpF)
+f_use_session = input.bool(true,"Filtre horaire",          group=grpF)
+f_session_start = input.int(8,  "  Session debut (h UTC)", group=grpF, minval=0, maxval=23)
+f_session_end   = input.int(22, "  Session fin (h UTC)",   group=grpF, minval=0, maxval=23)
+f_atr_len    = input.int(14,    "ATR Periode",             group=grpF)
+f_vol_ma_len = input.int(20,    "Volume MA Periode",       group=grpF)
+
+// ═══════════════════════════════════════════════════════════════
+//  GESTION DU RISQUE
+// ═══════════════════════════════════════════════════════════════
+grpR = "Gestion du Risque"
+r_sl_mode    = input.string("ATR", "Stop-Loss mode", options=["ATR", "Fixe %"], group=grpR)
+r_sl_atr_mult = input.float(1.5, "  SL x ATR",          group=grpR, step=0.1)
+r_sl_pct     = input.float(0.5,  "  SL fixe %",          group=grpR, step=0.1)
+r_tp_mode    = input.string("R:R", "Take-Profit mode", options=["R:R", "Fixe %"], group=grpR)
+r_rr_ratio   = input.float(2.0,  "  Ratio R:R",          group=grpR, step=0.1)
+r_tp_pct     = input.float(1.0,  "  TP fixe %",          group=grpR, step=0.1)
+r_use_trail  = input.bool(true,  "Trailing Stop",         group=grpR)
+r_trail_atr  = input.float(1.0,  "  Trail x ATR",        group=grpR, step=0.1)
+r_max_loss   = input.int(3,      "Pause apres X pertes consecutives", group=grpR, minval=1, maxval=10)
+
+// ═══════════════════════════════════════════════════════════════
+//  AFFICHAGE
+// ═══════════════════════════════════════════════════════════════
+grpV = "Affichage"
+show_squeeze = input.bool(true,  "Montrer Squeeze (fond)", group=grpV)
+show_struct  = input.bool(true,  "Montrer Structure",      group=grpV)
+show_htf     = input.bool(true,  "Montrer Supertrend HTF", group=grpV)
+show_hma     = input.bool(true,  "Montrer HMA",            group=grpV)
+show_vwap    = input.bool(true,  "Montrer VWAP",           group=grpV)
+
+// ═══════════════════════════════════════════════════════════════
+//  CALCULS COMMUNS
+// ═══════════════════════════════════════════════════════════════
+
+// ATR local (timeframe courant)
+atr_val = ta.atr(f_atr_len)
+
+// Volume
+vol_ma = ta.sma(volume, f_vol_ma_len)
+vol_ok = volume > vol_ma * 0.8
+
+// Session filtre
+current_hour = hour(time, "UTC")
+in_session = f_use_session ? (current_hour >= f_session_start and current_hour < f_session_end) : true
+
+// VWAP
+vwap_val = ta.vwap(hlc3)
+
+// ═══════════════════════════════════════════════════════════════
+//  DONNEES 15 MIN (HTF) — DIRECTION
+// ═══════════════════════════════════════════════════════════════
+
+// Supertrend HTF
+[st_val, st_dir] = request.security(syminfo.tickerid, htf, ta.supertrend(f_st_mult, f_st_period))
+htf_bull = st_dir < 0   // prix au-dessus du Supertrend = bull
+htf_bear = st_dir > 0   // prix en-dessous = bear
+
+// VWAP filtre
+vwap_bull = f_use_vwap ? close > vwap_val : true
+vwap_bear = f_use_vwap ? close < vwap_val : true
+
+// Direction combinee HTF
+dir_bull = htf_bull and vwap_bull and in_session
+dir_bear = htf_bear and vwap_bear and in_session
+
+// ═══════════════════════════════════════════════════════════════
+//  MODE A — SQUEEZE BREAKOUT
+// ═══════════════════════════════════════════════════════════════
+
+// Bollinger Bands
+bb_basis = ta.sma(close, a_bb_len)
+bb_dev   = a_bb_mult * ta.stdev(close, a_bb_len)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+// Keltner Channel
+kc_basis = ta.ema(close, a_kc_len)
+kc_range = a_kc_mult * ta.atr(a_kc_len)
+kc_upper = kc_basis + kc_range
+kc_lower = kc_basis - kc_range
+
+// Squeeze detection : BB inside KC
+is_squeeze = bb_upper < kc_upper and bb_lower > kc_lower
+
+// Compter les barres en squeeze
+var int squeeze_count = 0
+if is_squeeze
+    squeeze_count += 1
+else
+    squeeze_count := 0
+
+// Momentum (regression lineaire)
+a_mom = ta.linreg(close - bb_basis, a_mom_len, 0)
+a_mom_prev = ta.linreg(close - bb_basis, a_mom_len, 1)
+a_mom_rising = a_mom > a_mom_prev
+a_mom_falling = a_mom < a_mom_prev
+
+// Signal Squeeze : sortie de squeeze + momentum dans le bon sens
+squeeze_release = not is_squeeze and is_squeeze[1] and squeeze_count[1] >= a_squeeze_bars
+modeA_bull = squeeze_release and a_mom > 0 and a_mom_rising and vol_ok
+modeA_bear = squeeze_release and a_mom < 0 and a_mom_falling and vol_ok
+
+// ═══════════════════════════════════════════════════════════════
+//  MODE B — STRUCTURE + PULLBACK
+// ═══════════════════════════════════════════════════════════════
+
+// Swing High / Low detection
+swing_hi = ta.pivothigh(high, b_swing_len, b_swing_len)
+swing_lo = ta.pivotlow(low, b_swing_len, b_swing_len)
+
+// Track derniers swings
+var float last_sh = na
+var float last_sl = na
+var float prev_sh = na
+var float prev_sl = na
+
+if not na(swing_hi)
+    prev_sh := last_sh
+    last_sh := swing_hi
+if not na(swing_lo)
+    prev_sl := last_sl
+    last_sl := swing_lo
+
+// Structure : Higher Highs + Higher Lows = bull
+struct_bull = not na(last_sh) and not na(prev_sh) and not na(last_sl) and not na(prev_sl) and last_sh > prev_sh and last_sl > prev_sl
+struct_bear = not na(last_sh) and not na(prev_sh) and not na(last_sl) and not na(prev_sl) and last_sh < prev_sh and last_sl < prev_sl
+
+// Hull Moving Average
+hma_half = math.round(b_hma_len / 2)
+hma_sqrt = math.round(math.sqrt(b_hma_len))
+hma_val  = ta.wma(2 * ta.wma(close, hma_half) - ta.wma(close, b_hma_len), hma_sqrt)
+
+// Pullback : prix revient vers HMA puis rebondit
+pullback_zone_bull = low <= hma_val + atr_val * b_pullback and close > hma_val
+pullback_zone_bear = high >= hma_val - atr_val * b_pullback and close < hma_val
+
+// Confirmation : bougie de rejet (meche)
+wick_bull = close > open and (open - low) > (close - open) * 0.5
+wick_bear = close < open and (high - open) > (open - close) * 0.5
+
+modeB_bull = struct_bull and pullback_zone_bull and wick_bull and vol_ok
+modeB_bear = struct_bear and pullback_zone_bear and wick_bear and vol_ok
+
+// ═══════════════════════════════════════════════════════════════
+//  MODE C — HYBRID MOMENTUM
+// ═══════════════════════════════════════════════════════════════
+
+// MACD custom
+c_fast_ma = ta.ema(close, c_macd_fast)
+c_slow_ma = ta.ema(close, c_macd_slow)
+c_macd    = c_fast_ma - c_slow_ma
+c_signal  = ta.ema(c_macd, c_macd_sig)
+c_hist    = c_macd - c_signal
+
+// MACD cross
+macd_cross_up   = ta.crossover(c_macd, c_signal)
+macd_cross_down = ta.crossunder(c_macd, c_signal)
+
+// Volume spike
+vol_spike = volume > vol_ma * c_vol_spike
+
+// Bougie englobante / forte
+body_size = math.abs(close - open)
+is_strong_bull = close > open and body_size > atr_val * c_engulf_atr
+is_strong_bear = close < open and body_size > atr_val * c_engulf_atr
+
+// Histogram momentum : acceleration
+hist_accel_bull = c_hist > c_hist[1] and c_hist > 0
+hist_accel_bear = c_hist < c_hist[1] and c_hist < 0
+
+modeC_bull = (macd_cross_up or hist_accel_bull) and vol_spike and is_strong_bull
+modeC_bear = (macd_cross_down or hist_accel_bear) and vol_spike and is_strong_bear
+
+// ═══════════════════════════════════════════════════════════════
+//  CONFLUENCE — SIGNAL FINAL
+// ═══════════════════════════════════════════════════════════════
+
+// Compter combien de modes donnent un signal
+countA_bull = use_modeA and modeA_bull ? 1 : 0
+countB_bull = use_modeB and modeB_bull ? 1 : 0
+countC_bull = use_modeC and modeC_bull ? 1 : 0
+total_bull  = countA_bull + countB_bull + countC_bull
+
+countA_bear = use_modeA and modeA_bear ? 1 : 0
+countB_bear = use_modeB and modeB_bear ? 1 : 0
+countC_bear = use_modeC and modeC_bear ? 1 : 0
+total_bear  = countA_bear + countB_bear + countC_bear
+
+// Au moins 1 mode doit etre actif
+modes_actifs = (use_modeA ? 1 : 0) + (use_modeB ? 1 : 0) + (use_modeC ? 1 : 0)
+conf_min = math.min(confluence, modes_actifs)
+
+// Signal final = direction HTF + confluence modes
+signal_bull = total_bull >= conf_min and dir_bull
+signal_bear = total_bear >= conf_min and dir_bear
+
+// ═══════════════════════════════════════════════════════════════
+//  GESTION DES PERTES CONSECUTIVES
+// ═══════════════════════════════════════════════════════════════
+var int consec_losses = 0
+if strategy.closedtrades > 0
+    last_pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if last_pnl < 0 and strategy.closedtrades > strategy.closedtrades[1]
+        consec_losses += 1
+    else if last_pnl >= 0 and strategy.closedtrades > strategy.closedtrades[1]
+        consec_losses := 0
+
+can_trade = consec_losses < r_max_loss
+
+// ═══════════════════════════════════════════════════════════════
+//  CALCUL SL / TP
+// ═══════════════════════════════════════════════════════════════
+
+// Stop-Loss
+sl_dist = r_sl_mode == "ATR" ? atr_val * r_sl_atr_mult : close * r_sl_pct / 100
+sl_long  = close - sl_dist
+sl_short = close + sl_dist
+
+// Take-Profit
+tp_dist = r_tp_mode == "R:R" ? sl_dist * r_rr_ratio : close * r_tp_pct / 100
+tp_long  = close + tp_dist
+tp_short = close - tp_dist
+
+// Trailing
+trail_dist = atr_val * r_trail_atr
+
+// ═══════════════════════════════════════════════════════════════
+//  ENTREES / SORTIES
+// ═══════════════════════════════════════════════════════════════
+
+if signal_bull and can_trade and strategy.position_size <= 0
+    strategy.entry("LONG", strategy.long)
+    if r_use_trail
+        strategy.exit("Exit L", "LONG", stop=sl_long, limit=tp_long, trail_points=trail_dist / syminfo.mintick, trail_offset=trail_dist / syminfo.mintick / 2)
+    else
+        strategy.exit("Exit L", "LONG", stop=sl_long, limit=tp_long)
+
+if signal_bear and can_trade and strategy.position_size >= 0
+    strategy.entry("SHORT", strategy.short)
+    if r_use_trail
+        strategy.exit("Exit S", "SHORT", stop=sl_short, limit=tp_short, trail_points=trail_dist / syminfo.mintick, trail_offset=trail_dist / syminfo.mintick / 2)
+    else
+        strategy.exit("Exit S", "SHORT", stop=sl_short, limit=tp_short)
+
+// ═══════════════════════════════════════════════════════════════
+//  AFFICHAGE
+// ═══════════════════════════════════════════════════════════════
+
+// Supertrend HTF
+plot(show_htf ? st_val : na, "Supertrend HTF", color=htf_bull ? color.new(#00E676, 20) : color.new(#FF1744, 20), linewidth=2, style=plot.style_stepline_diamond)
+
+// HMA
+plot(show_hma ? hma_val : na, "HMA", color=color.new(#FF9800, 30), linewidth=2)
+
+// VWAP
+plot(show_vwap ? vwap_val : na, "VWAP", color=color.new(#2196F3, 30), linewidth=1, style=plot.style_circles)
+
+// Fond squeeze
+bgcolor(show_squeeze and is_squeeze ? color.new(#9C27B0, 85) : na, title="Squeeze")
+bgcolor(show_squeeze and squeeze_release ? color.new(#FFEB3B, 70) : na, title="Release")
+
+// Structure
+plotshape(show_struct and not na(swing_hi) ? swing_hi : na, title="Swing High", location=location.absolute, style=shape.triangledown, color=color.new(#FF5252, 30), size=size.tiny, offset=-b_swing_len)
+plotshape(show_struct and not na(swing_lo) ? swing_lo : na, title="Swing Low", location=location.absolute, style=shape.triangleup, color=color.new(#69F0AE, 30), size=size.tiny, offset=-b_swing_len)
+
+// Signaux
+plotshape(signal_bull and can_trade, title="LONG",  location=location.belowbar, style=shape.arrowup,   color=color.new(#00E676, 0), size=size.normal, text="LONG")
+plotshape(signal_bear and can_trade, title="SHORT", location=location.abovebar, style=shape.arrowdown, color=color.new(#FF1744, 0), size=size.normal, text="SHORT")
+
+// Pause
+plotshape(not can_trade and (signal_bull or signal_bear), title="PAUSE", location=location.abovebar, style=shape.xcross, color=color.new(#FF9800, 0), size=size.small, text="PAUSE")
+
+// Couleur barre
+barcolor(signal_bull and can_trade ? color.new(#00E676, 0) : signal_bear and can_trade ? color.new(#FF1744, 0) : na)
+
+// Fond session
+bgcolor(not in_session ? color.new(#37474F, 90) : na, title="Hors session")
+
+// ═══════════════════════════════════════════════════════════════
+//  DASHBOARD
+// ═══════════════════════════════════════════════════════════════
+ok(v) => v ? "OK " : "-- "
+
+if barstate.islast
+    // Modes actifs
+    mode_txt = ""
+    if use_modeA
+        mode_txt += "A:Squeeze "
+    if use_modeB
+        mode_txt += "B:Struct "
+    if use_modeC
+        mode_txt += "C:Momentum "
+
+    // Etat marche
+    mkt = htf_bull ? "BULL (HTF)" : htf_bear ? "BEAR (HTF)" : "NEUTRE"
+
+    // Signaux par mode
+    sa_bull = use_modeA ? ok(modeA_bull) : "OFF "
+    sb_bull = use_modeB ? ok(modeB_bull) : "OFF "
+    sc_bull = use_modeC ? ok(modeC_bull) : "OFF "
+
+    // Score
+    score = total_bull
+
+    d1  = "══════ ERWIN INTRADAY ══════\n"
+    d2  = "Marche   : " + mkt + "\n"
+    d3  = "Modes    : " + mode_txt + "\n"
+    d4  = "Confluence: " + str.tostring(conf_min) + " requis\n"
+    d5  = "SL: " + r_sl_mode + " | TP: " + r_tp_mode + "\n"
+    d6  = "─────── Signaux BULL ───────\n"
+    d7  = sa_bull + "A: Squeeze Breakout\n"
+    d8  = sb_bull + "B: Structure Pullback\n"
+    d9  = sc_bull + "C: Hybrid Momentum\n"
+    d10 = "─────── Filtres HTF ────────\n"
+    d11 = ok(htf_bull) + "Supertrend 15min\n"
+    d12 = ok(vwap_bull) + "Prix > VWAP\n"
+    d13 = ok(in_session) + "Session active\n"
+    d14 = ok(vol_ok) + "Volume\n"
+    d15 = ok(can_trade) + "Autorise (pertes: " + str.tostring(consec_losses) + "/" + str.tostring(r_max_loss) + ")\n"
+    d16 = "─────── Indicateurs ────────\n"
+    d17 = "ATR     : " + str.tostring(math.round(atr_val, 2)) + "\n"
+    d18 = "Squeeze : " + (is_squeeze ? "OUI (" + str.tostring(squeeze_count) + " barres)" : "NON") + "\n"
+    d19 = "MACD H  : " + str.tostring(math.round(c_hist, 2)) + "\n"
+    d20 = "Struct  : " + (struct_bull ? "BULL" : struct_bear ? "BEAR" : "NEUTRE") + "\n"
+    d21 = "════════════════════════════"
+
+    full = d1+d2+d3+d4+d5+d6+d7+d8+d9+d10+d11+d12+d13+d14+d15+d16+d17+d18+d19+d20+d21
+
+    var color dc = color.new(#546E7A, 10)
+    if htf_bull
+        dc := color.new(#00C896, 10)
+    else if htf_bear
+        dc := color.new(#FF4560, 10)
+    else
+        dc := color.new(#546E7A, 10)
+
+    label.new(bar_index + 3, high,
+              text      = full,
+              xloc      = xloc.bar_index,
+              yloc      = yloc.price,
+              color     = dc,
+              textcolor = color.white,
+              style     = label.style_label_left,
+              size      = size.normal)
