@@ -1,0 +1,228 @@
+//@version=5
+strategy("Erwin Intraday V2",
+         shorttitle        = "Erwin Intra V2",
+         overlay           = true,
+         initial_capital   = 10000,
+         default_qty_type  = strategy.percent_of_equity,
+         default_qty_value = 100,
+         commission_type   = strategy.commission.percent,
+         commission_value  = 0.075,
+         slippage          = 1,
+         calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════
+//  PRINCIPE :
+//  - HTF (1H) donne la DIRECTION via EMA + Supertrend
+//  - LTF (graphique) donne l ENTREE via pullback + confirmation
+//  - On achete UNIQUEMENT en tendance bull HTF
+//  - On vend UNIQUEMENT en tendance bear HTF
+//  - Pas de trades en range / transition
+// ═══════════════════════════════════════════════════════════════
+
+// ── TIMEFRAME SUPERIEUR ──────────────────────────────────────
+grp1 = "Direction (HTF)"
+htf            = input.timeframe("60", "Timeframe superieur", group=grp1)
+htf_ema_fast   = input.int(9,    "EMA rapide HTF",      group=grp1)
+htf_ema_slow   = input.int(21,   "EMA lente HTF",       group=grp1)
+htf_st_period  = input.int(10,   "Supertrend Periode",  group=grp1)
+htf_st_mult    = input.float(3.0,"Supertrend Mult",     group=grp1, step=0.1)
+
+// ── ENTREE (LTF) ────────────────────────────────────────────
+grp2 = "Entree (LTF)"
+ltf_ema_len    = input.int(21,    "EMA Pullback",        group=grp2)
+ltf_rsi_len    = input.int(14,    "RSI Periode",         group=grp2)
+ltf_rsi_ob     = input.int(70,    "RSI Surachat",        group=grp2)
+ltf_rsi_os     = input.int(30,    "RSI Survente",        group=grp2)
+ltf_atr_len    = input.int(14,    "ATR Periode",         group=grp2)
+use_vol_filter = input.bool(true, "Filtre Volume",       group=grp2)
+vol_ma_len     = input.int(20,    "Volume MA Periode",   group=grp2)
+vol_mult       = input.float(1.0, "Volume minimum (x moy)", group=grp2, step=0.1)
+
+// ── GESTION DU RISQUE ────────────────────────────────────────
+grp3 = "Risque"
+sl_atr_mult    = input.float(1.5, "Stop-Loss x ATR",     group=grp3, step=0.1)
+tp_rr          = input.float(2.0, "Take-Profit R:R",     group=grp3, step=0.1)
+use_trailing   = input.bool(true, "Trailing Stop",        group=grp3)
+trail_atr_mult = input.float(1.0, "Trailing x ATR",      group=grp3, step=0.1)
+
+// ── SESSION ──────────────────────────────────────────────────
+grp4 = "Session"
+use_session    = input.bool(true, "Filtre horaire",       group=grp4)
+session_start  = input.int(7,     "Debut (h UTC)",        group=grp4, minval=0, maxval=23)
+session_end    = input.int(22,    "Fin (h UTC)",          group=grp4, minval=0, maxval=23)
+
+// ═══════════════════════════════════════════════════════════════
+//  CALCULS HTF — DIRECTION
+// ═══════════════════════════════════════════════════════════════
+
+// EMA rapide et lente sur HTF
+htf_ema_f = request.security(syminfo.tickerid, htf, ta.ema(close, htf_ema_fast), lookahead=barmerge.lookahead_off)
+htf_ema_s = request.security(syminfo.tickerid, htf, ta.ema(close, htf_ema_slow), lookahead=barmerge.lookahead_off)
+
+// Supertrend HTF
+[htf_st_val, htf_st_dir] = request.security(syminfo.tickerid, htf, ta.supertrend(htf_st_mult, htf_st_period), lookahead=barmerge.lookahead_off)
+
+// Direction HTF claire
+htf_trend_bull = htf_ema_f > htf_ema_s and htf_st_dir < 0   // EMA bull + Supertrend bull
+htf_trend_bear = htf_ema_f < htf_ema_s and htf_st_dir > 0   // EMA bear + Supertrend bear
+htf_range      = not htf_trend_bull and not htf_trend_bear    // Ni l un ni l autre = on ne trade pas
+
+// ═══════════════════════════════════════════════════════════════
+//  CALCULS LTF — ENTREE
+// ═══════════════════════════════════════════════════════════════
+
+// EMA locale pour pullback
+ema_local = ta.ema(close, ltf_ema_len)
+
+// RSI
+rsi_val = ta.rsi(close, ltf_rsi_len)
+
+// ATR
+atr_val = ta.atr(ltf_atr_len)
+
+// Volume
+vol_ma = ta.sma(volume, vol_ma_len)
+vol_ok = use_vol_filter ? volume > vol_ma * vol_mult : true
+
+// Session
+current_hour = hour(time, "UTC")
+in_session = use_session ? (current_hour >= session_start and current_hour < session_end) : true
+
+// ═══════════════════════════════════════════════════════════════
+//  CONDITIONS D ENTREE — SIMPLES ET CLAIRES
+// ═══════════════════════════════════════════════════════════════
+
+// ── LONG ──
+// 1. HTF est bull (EMA + Supertrend confirment)
+// 2. Prix fait un pullback vers EMA locale (touche ou passe en dessous)
+// 3. Bougie de rebond (ferme au-dessus de l EMA)
+// 4. RSI pas en surachat
+// 5. Volume OK
+
+pullback_bull   = low <= ema_local and close > ema_local    // touche EMA puis ferme au-dessus
+candle_bull     = close > open                               // bougie verte
+rsi_ok_bull     = rsi_val < ltf_rsi_ob and rsi_val > ltf_rsi_os  // RSI ni surachat ni survente
+
+entry_long = htf_trend_bull and pullback_bull and candle_bull and rsi_ok_bull and vol_ok and in_session
+
+// ── SHORT ──
+// 1. HTF est bear (EMA + Supertrend confirment)
+// 2. Prix fait un pullback vers EMA locale (touche ou passe au-dessus)
+// 3. Bougie de rejet (ferme en dessous de l EMA)
+// 4. RSI pas en survente
+// 5. Volume OK
+
+pullback_bear   = high >= ema_local and close < ema_local   // touche EMA puis ferme en dessous
+candle_bear     = close < open                               // bougie rouge
+rsi_ok_bear     = rsi_val > ltf_rsi_os and rsi_val < ltf_rsi_ob
+
+entry_short = htf_trend_bear and pullback_bear and candle_bear and rsi_ok_bear and vol_ok and in_session
+
+// ═══════════════════════════════════════════════════════════════
+//  STOP-LOSS / TAKE-PROFIT
+// ═══════════════════════════════════════════════════════════════
+
+sl_dist = atr_val * sl_atr_mult
+tp_dist = sl_dist * tp_rr
+trail_pts = atr_val * trail_atr_mult
+
+sl_long  = close - sl_dist
+tp_long  = close + tp_dist
+sl_short = close + sl_dist
+tp_short = close - tp_dist
+
+// ═══════════════════════════════════════════════════════════════
+//  EXECUTION
+// ═══════════════════════════════════════════════════════════════
+
+// Fermer position opposee + entrer
+if entry_long and strategy.position_size <= 0
+    strategy.entry("LONG", strategy.long)
+    if use_trailing
+        strategy.exit("XL", "LONG", stop=sl_long, limit=tp_long, trail_points=trail_pts/syminfo.mintick, trail_offset=trail_pts/syminfo.mintick/2)
+    else
+        strategy.exit("XL", "LONG", stop=sl_long, limit=tp_long)
+
+if entry_short and strategy.position_size >= 0
+    strategy.entry("SHORT", strategy.short)
+    if use_trailing
+        strategy.exit("XS", "SHORT", stop=sl_short, limit=tp_short, trail_points=trail_pts/syminfo.mintick, trail_offset=trail_pts/syminfo.mintick/2)
+    else
+        strategy.exit("XS", "SHORT", stop=sl_short, limit=tp_short)
+
+// ═══════════════════════════════════════════════════════════════
+//  AFFICHAGE
+// ═══════════════════════════════════════════════════════════════
+
+// EMA locale
+plot(ema_local, "EMA Pullback", color=color.new(#FF9800, 20), linewidth=2)
+
+// Supertrend HTF
+plot(htf_st_val, "Supertrend HTF", color=htf_trend_bull ? color.new(#00E676, 30) : htf_trend_bear ? color.new(#FF1744, 30) : color.new(#9E9E9E, 50), linewidth=2, style=plot.style_stepline_diamond)
+
+// EMAs HTF
+plot(htf_ema_f, "EMA Fast HTF", color=color.new(#2196F3, 40), linewidth=1)
+plot(htf_ema_s, "EMA Slow HTF", color=color.new(#E91E63, 40), linewidth=1)
+
+// Fond : tendance HTF
+bgcolor(htf_trend_bull ? color.new(#00E676, 92) : htf_trend_bear ? color.new(#FF1744, 92) : color.new(#9E9E9E, 95), title="Tendance HTF")
+
+// Fond session
+bgcolor(not in_session ? color.new(#37474F, 88) : na, title="Hors session")
+
+// Signaux
+plotshape(entry_long,  title="LONG",  location=location.belowbar, style=shape.arrowup,   color=color.new(#00E676, 0), size=size.normal, text="BUY")
+plotshape(entry_short, title="SHORT", location=location.abovebar, style=shape.arrowdown, color=color.new(#FF1744, 0), size=size.normal, text="SELL")
+
+// Range = pas de trade
+plotshape(htf_range and (pullback_bull or pullback_bear) and barstate.isconfirmed, title="RANGE", location=location.abovebar, style=shape.xcross, color=color.new(#FF9800, 30), size=size.tiny)
+
+barcolor(entry_long ? color.new(#00E676, 0) : entry_short ? color.new(#FF1744, 0) : na)
+
+// ═══════════════════════════════════════════════════════════════
+//  DASHBOARD
+// ═══════════════════════════════════════════════════════════════
+ok(v) => v ? "OK " : "-- "
+
+if barstate.islast
+    trend_txt = htf_trend_bull ? "HAUSSIER" : htf_trend_bear ? "BAISSIER" : "RANGE (pas de trade)"
+
+    d1  = "═══════ ERWIN INTRA V2 ═══════\n"
+    d2  = "Tendance HTF : " + trend_txt + "\n"
+    d3  = "────── Conditions LONG ──────\n"
+    d4  = ok(htf_trend_bull)  + "Tendance HTF haussiere\n"
+    d5  = ok(pullback_bull)   + "Pullback sur EMA\n"
+    d6  = ok(candle_bull)     + "Bougie verte\n"
+    d7  = ok(rsi_ok_bull)     + "RSI " + str.tostring(math.round(rsi_val,1)) + " OK\n"
+    d8  = ok(vol_ok)          + "Volume\n"
+    d9  = ok(in_session)      + "Session\n"
+    d10 = "────── Conditions SHORT ─────\n"
+    d11 = ok(htf_trend_bear)  + "Tendance HTF baissiere\n"
+    d12 = ok(pullback_bear)   + "Pullback sur EMA\n"
+    d13 = ok(candle_bear)     + "Bougie rouge\n"
+    d14 = ok(rsi_ok_bear)     + "RSI OK\n"
+    d15 = "────── Indicateurs ──────────\n"
+    d16 = "ATR    : " + str.tostring(math.round(atr_val, 2)) + "\n"
+    d17 = "RSI    : " + str.tostring(math.round(rsi_val, 1)) + "\n"
+    d18 = "SL     : " + str.tostring(math.round(sl_dist, 2)) + "\n"
+    d19 = "TP     : " + str.tostring(math.round(tp_dist, 2)) + "\n"
+    d20 = "═══════════════════════════════"
+
+    full = d1+d2+d3+d4+d5+d6+d7+d8+d9+d10+d11+d12+d13+d14+d15+d16+d17+d18+d19+d20
+
+    var color dc = color.new(#546E7A, 10)
+    if htf_trend_bull
+        dc := color.new(#00C896, 10)
+    else if htf_trend_bear
+        dc := color.new(#FF4560, 10)
+    else
+        dc := color.new(#546E7A, 10)
+
+    label.new(bar_index + 3, high,
+              text      = full,
+              xloc      = xloc.bar_index,
+              yloc      = yloc.price,
+              color     = dc,
+              textcolor = color.white,
+              style     = label.style_label_left,
+              size      = size.normal)
