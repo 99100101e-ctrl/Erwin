@@ -50,17 +50,20 @@ def format_conditions(conditions: list) -> str:
     return "\n".join(lines)
 
 
-def format_entry_alert(result: dict) -> str:
+def format_entry_alert(result: dict, label: str = "Erwin 1H", sl_pct: float = None, tp_pct: float = None, timeframe: str = None) -> str:
     """Formate un message d'alerte d'entree en position."""
     sig = result["signal"]
     emoji = "\U0001F7E2" if sig == "LONG" else "\U0001F534"
     direction = "ACHAT (LONG)" if sig == "LONG" else "VENTE (SHORT)"
+    _sl_pct = sl_pct if sl_pct is not None else cfg.SL_PCT
+    _tp_pct = tp_pct if tp_pct is not None else cfg.TP_PCT
+    _tf = timeframe or cfg.TIMEFRAME
 
     lines = [
         f"{emoji} <b>SIGNAL {direction}</b>",
         f"",
         f"<b>Paire :</b> {cfg.SYMBOL}",
-        f"<b>Timeframe :</b> {cfg.TIMEFRAME}",
+        f"<b>Timeframe :</b> {_tf}",
         f"<b>Prix :</b> {result['close']:.2f}",
         f"<b>Type :</b> {result['signal_type']}",
         f"",
@@ -68,10 +71,10 @@ def format_entry_alert(result: dict) -> str:
 
     if result.get("sl"):
         sl_val = float(result["sl"])
-        lines.append(f"\U0001F6D1 <b>Stop-Loss :</b> {sl_val:.2f} (-{cfg.SL_PCT}%)")
+        lines.append(f"\U0001F6D1 <b>Stop-Loss :</b> {sl_val:.2f} (-{_sl_pct}%)")
     if result.get("tp"):
         tp_val = float(result["tp"])
-        lines.append(f"\U0001F3AF <b>Take-Profit :</b> {tp_val:.2f} (+{cfg.TP_PCT}%)")
+        lines.append(f"\U0001F3AF <b>Take-Profit :</b> {tp_val:.2f} (+{_tp_pct}%)")
 
     lines += [
         f"",
@@ -80,13 +83,13 @@ def format_entry_alert(result: dict) -> str:
         f"",
         f"<b>Marche :</b> {result['market_state']}",
         f"",
-        f"<i>Erwin Strategy 1H — {result['timestamp']}</i>",
+        f"<i>{label} — {result['timestamp']}</i>",
     ]
 
     return "\n".join(lines)
 
 
-def format_exit_alert(direction: str, close_price: float, reason: str, entry_price: float = None) -> str:
+def format_exit_alert(direction: str, close_price: float, reason: str, entry_price: float = None, label: str = "Erwin 1H") -> str:
     """Formate un message d'alerte de sortie de position."""
     emoji = "\U000026A0"
 
@@ -94,6 +97,7 @@ def format_exit_alert(direction: str, close_price: float, reason: str, entry_pri
         f"{emoji} <b>SORTIE DE POSITION</b>",
         f"",
         f"<b>Paire :</b> {cfg.SYMBOL}",
+        f"<b>Strategie :</b> {label}",
         f"<b>Direction :</b> {direction}",
         f"<b>Prix de sortie :</b> {close_price:.2f}",
         f"<b>Raison :</b> {reason}",
@@ -108,19 +112,20 @@ def format_exit_alert(direction: str, close_price: float, reason: str, entry_pri
 
     lines += [
         f"",
-        f"<i>Erwin Strategy 1H</i>",
+        f"<i>{label}</i>",
     ]
 
     return "\n".join(lines)
 
 
-def format_status(result: dict, tracker=None) -> str:
+def format_status(result: dict, tracker=None, label: str = "Erwin 1H", timeframe: str = None) -> str:
     """Formate le message /status avec toutes les infos de la strategie."""
+    _tf = timeframe or cfg.TIMEFRAME
     lines = [
-        f"\U0001F4CA <b>ERWIN STRATEGY 1H — STATUS</b>",
+        f"\U0001F4CA <b>{label.upper()} — STATUS</b>",
         f"",
         f"<b>Paire :</b> {cfg.SYMBOL}",
-        f"<b>Timeframe :</b> {cfg.TIMEFRAME}",
+        f"<b>Timeframe :</b> {_tf}",
         f"<b>Prix :</b> {result['close']:.2f}",
         f"<b>Marche :</b> {result['market_state']}",
         f"",
@@ -159,16 +164,16 @@ def format_status(result: dict, tracker=None) -> str:
         f"Kijun : {result['kijun']} | Tenkan : {result['tenkan']}",
         f"EMA200 : {result['ema200']}",
         f"",
-        f"<i>{result['timestamp']}</i>",
+        f"<i>{label} — {result['timestamp']}</i>",
     ]
 
     return "\n".join([l for l in lines if l is not None])
 
 
-def format_daily_summary(result: dict, daily_stats: dict) -> str:
+def format_daily_summary(result: dict, daily_stats: dict, label: str = "Erwin 1H") -> str:
     """Formate le resume quotidien de 22h."""
     lines = [
-        f"\U0001F319 <b>RESUME JOURNALIER — ERWIN 1H</b>",
+        f"\U0001F319 <b>RESUME JOURNALIER — {label.upper()}</b>",
         f"",
         f"<b>Paire :</b> {cfg.SYMBOL}",
         f"<b>Prix actuel :</b> {result['close']:.2f}",
@@ -198,29 +203,29 @@ def format_daily_summary(result: dict, daily_stats: dict) -> str:
         f"<b>--- Conditions actuelles ({result['score_bull']}/9) ---</b>",
         format_conditions(result["conditions"]),
         f"",
-        f"<i>Erwin Strategy 1H — Resume 22h</i>",
+        f"<i>{label} — Resume 22h</i>",
     ]
 
     return "\n".join(lines)
 
 
-def notify_entry(result: dict) -> bool:
-    msg = format_entry_alert(result)
+def notify_entry(result: dict, label: str = "Erwin 1H", sl_pct: float = None, tp_pct: float = None, timeframe: str = None) -> bool:
+    msg = format_entry_alert(result, label=label, sl_pct=sl_pct, tp_pct=tp_pct, timeframe=timeframe)
     return send_telegram(msg)
 
 
-def notify_exit(direction: str, close_price: float, reason: str, entry_price: float = None) -> bool:
-    msg = format_exit_alert(direction, close_price, reason, entry_price)
+def notify_exit(direction: str, close_price: float, reason: str, entry_price: float = None, label: str = "Erwin 1H") -> bool:
+    msg = format_exit_alert(direction, close_price, reason, entry_price, label=label)
     return send_telegram(msg)
 
 
-def notify_status(result: dict, tracker=None) -> bool:
-    msg = format_status(result, tracker)
+def notify_status(result: dict, tracker=None, label: str = "Erwin 1H", timeframe: str = None) -> bool:
+    msg = format_status(result, tracker, label=label, timeframe=timeframe)
     return send_telegram(msg)
 
 
-def notify_daily_summary(result: dict, daily_stats: dict) -> bool:
-    msg = format_daily_summary(result, daily_stats)
+def notify_daily_summary(result: dict, daily_stats: dict, label: str = "Erwin 1H") -> bool:
+    msg = format_daily_summary(result, daily_stats, label=label)
     return send_telegram(msg)
 
 

@@ -41,7 +41,7 @@ def detect_flat(adx_val, bb_width, atr_val, atr_ma):
     return is_flat, is_trending
 
 
-def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
+def generate_signals(df: pd.DataFrame, sl_pct: float = None, tp_pct: float = None) -> pd.DataFrame:
     """
     Analyse un DataFrame OHLCV et ajoute les colonnes de signaux.
 
@@ -131,14 +131,16 @@ def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[partial_bear & entry_bear, "signal_type"] = "partial"
 
     # ── Stop-loss / Take-profit ───────────────────────────────
+    _sl_pct = sl_pct if sl_pct is not None else cfg.SL_PCT
+    _tp_pct = tp_pct if tp_pct is not None else cfg.TP_PCT
     df["sl"] = None
     df["tp"] = None
     if cfg.USE_SL:
-        df.loc[entry_bull, "sl"] = df.loc[entry_bull, "close"] * (1 - cfg.SL_PCT / 100)
-        df.loc[entry_bear, "sl"] = df.loc[entry_bear, "close"] * (1 + cfg.SL_PCT / 100)
+        df.loc[entry_bull, "sl"] = df.loc[entry_bull, "close"] * (1 - _sl_pct / 100)
+        df.loc[entry_bear, "sl"] = df.loc[entry_bear, "close"] * (1 + _sl_pct / 100)
     if cfg.USE_TP:
-        df.loc[entry_bull, "tp"] = df.loc[entry_bull, "close"] * (1 + cfg.TP_PCT / 100)
-        df.loc[entry_bear, "tp"] = df.loc[entry_bear, "close"] * (1 - cfg.TP_PCT / 100)
+        df.loc[entry_bull, "tp"] = df.loc[entry_bull, "close"] * (1 + _tp_pct / 100)
+        df.loc[entry_bear, "tp"] = df.loc[entry_bear, "close"] * (1 - _tp_pct / 100)
 
     # ── Score bull (dashboard) ────────────────────────────────
     score = (

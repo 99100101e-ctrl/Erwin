@@ -44,8 +44,12 @@ def health():
 @app.get("/signal")
 def signal(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 300):
     """Retourne le signal courant et le dashboard."""
+    # Utiliser les SL/TP de la strategie si elle existe
+    strat = cfg.STRATEGIES.get(timeframe, {})
+    sl_pct = strat.get("sl_pct", cfg.SL_PCT)
+    tp_pct = strat.get("tp_pct", cfg.TP_PCT)
     df = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
-    df = generate_signals(df)
+    df = generate_signals(df, sl_pct=sl_pct, tp_pct=tp_pct)
     return get_latest_signal(df)
 
 

@@ -1,9 +1,10 @@
 """
-Erwin Strategy 1H — Scanner en boucle avec alertes Telegram.
+Erwin Strategy — Scanner Multi-Timeframe (1H + 15M).
 
 Fonctionnalites :
-  - Scan toutes les heures, detecte entrees/sorties, notifie par Telegram
-  - Commande /status : etat complet de la strategie + conditions remplies
+  - Scan 1H toutes les heures, 15M toutes les 15 minutes
+  - Detecte entrees/sorties, notifie par Telegram
+  - Commande /status : etat complet des 2 strategies
   - Resume quotidien automatique a 22h (heure Paris)
 
 Usage :
@@ -122,7 +123,78 @@ class DailyStats:
         }
 
 
-def handle_telegram_commands(tracker, update_offset):
+def scan_strategy(strat_key: str, strat_cfg: dict, tracker: PositionTracker, daily_stats: DailyStats):
+    """Execute un scan pour une strategie donnee (1h ou 15m)."""
+    label = strat_cfg["label"]
+    tf = strat_cfg["timeframe"]
+    sl_pct = strat_cfg["sl_pct"]
+    tp_pct = strat_cfg["tp_pct"]
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    print(f"\n[{now_str}] Scan {label} en cours...")
+
+    df = fetch_ohlcv(timeframe=tf, limit=300)
+    df = generate_signals(df, sl_pct=sl_pct, tp_pct=tp_pct)
+    result = get_latest_signal(df)
+    last_row = df.iloc[-1]
+
+    # Compter les signaux detectes
+    if result["signal"]:
+        daily_stats.record_signal(result["signal"])
+
+    # ── Verifier sortie de position ──────────────
+    if tracker.active:
+        exit_reason = tracker.check_exit(
+            high=last_row["high"],
+            low=last_row["low"],
+            close=last_row["close"],
+        )
+        if exit_reason:
+            direction, entry_price = tracker.close()
+            daily_stats.record_exit(direction, entry_price, last_row["close"], exit_reason)
+            notify_exit(
+                direction=direction,
+                close_price=last_row["close"],
+                reason=exit_reason,
+                entry_price=entry_price,
+                label=label,
+            )
+            print(f"  [{label}] >> SORTIE {direction} : {exit_reason}")
+
+        # Signal inverse
+        if result["signal"] and result["signal"] != tracker.direction:
+            direction, entry_price = tracker.close()
+            reason = f"Signal inverse ({result['signal']})"
+            daily_stats.record_exit(direction, entry_price, last_row["close"], reason)
+            notify_exit(
+                direction=direction,
+                close_price=last_row["close"],
+                reason=reason,
+                entry_price=entry_price,
+                label=label,
+            )
+            print(f"  [{label}] >> SORTIE {direction} : signal inverse")
+
+    # ── Verifier entree en position ──────────────
+    if result["signal"] and not tracker.active:
+        daily_stats.record_entry()
+        notify_entry(result, label=label, sl_pct=sl_pct, tp_pct=tp_pct, timeframe=tf)
+        tracker.open(
+            signal=result["signal"],
+            entry_price=result["close"],
+            sl=result["sl"],
+            tp=result["tp"],
+        )
+        print(f"  [{label}] >> ENTREE {result['signal']} @ {result['close']:.2f}")
+        print(f"     SL: {result['sl']}  |  TP: {result['tp']}")
+    elif not result["signal"]:
+        print(f"  [{label}] Pas de signal | {result['market_state']} | Score: {result['score_bull']}/9")
+
+    if tracker.active:
+        print(f"  [{label}] Position ouverte: {tracker.direction} @ {tracker.entry_price:.2f}")
+
+
+def handle_telegram_commands(trackers: dict, update_offset):
     """Verifie si l'utilisateur a envoye /status sur Telegram."""
     updates = get_telegram_updates(offset=update_offset)
 
@@ -139,11 +211,16 @@ def handle_telegram_commands(tracker, update_offset):
 
         if text.startswith("/status"):
             try:
-                df = fetch_ohlcv(limit=300)
-                df = generate_signals(df)
-                result = get_latest_signal(df)
-                notify_status(result, tracker)
-                print(f"  [CMD] /status envoye")
+                for strat_key, strat_cfg in cfg.STRATEGIES.items():
+                    label = strat_cfg["label"]
+                    tf = strat_cfg["timeframe"]
+                    sl_pct = strat_cfg["sl_pct"]
+                    tp_pct = strat_cfg["tp_pct"]
+                    df = fetch_ohlcv(timeframe=tf, limit=300)
+                    df = generate_signals(df, sl_pct=sl_pct, tp_pct=tp_pct)
+                    result = get_latest_signal(df)
+                    notify_status(result, trackers.get(strat_key), label=label, timeframe=tf)
+                print(f"  [CMD] /status envoye pour toutes les strategies")
             except Exception as e:
                 send_telegram(f"\u274C Erreur /status : {e}")
                 print(f"  [CMD] Erreur /status : {e}")
@@ -151,19 +228,25 @@ def handle_telegram_commands(tracker, update_offset):
     return new_offset
 
 
-def check_daily_summary(last_summary_date, daily_stats):
-    """Envoie le resume quotidien a 22h Paris."""
+def check_daily_summary(last_summary_date, daily_stats_all: dict):
+    """Envoie le resume quotidien a 22h Paris pour chaque strategie."""
     now_paris = datetime.now(TZ_PARIS)
     today = now_paris.date()
 
     # Envoyer a 22h si pas deja fait aujourd'hui
     if now_paris.hour >= 22 and last_summary_date != today:
         try:
-            df = fetch_ohlcv(limit=300)
-            df = generate_signals(df)
-            result = get_latest_signal(df)
-            notify_daily_summary(result, daily_stats.to_dict())
-            print(f"  [DAILY] Resume 22h envoye")
+            for strat_key, strat_cfg in cfg.STRATEGIES.items():
+                label = strat_cfg["label"]
+                tf = strat_cfg["timeframe"]
+                sl_pct = strat_cfg["sl_pct"]
+                tp_pct = strat_cfg["tp_pct"]
+                df = fetch_ohlcv(timeframe=tf, limit=300)
+                df = generate_signals(df, sl_pct=sl_pct, tp_pct=tp_pct)
+                result = get_latest_signal(df)
+                stats = daily_stats_all[strat_key]
+                notify_daily_summary(result, stats.to_dict(), label=label)
+            print(f"  [DAILY] Resume 22h envoye pour toutes les strategies")
             return today
         except Exception as e:
             send_telegram(f"\u274C Erreur resume quotidien : {e}")
@@ -173,9 +256,17 @@ def check_daily_summary(last_summary_date, daily_stats):
 
 
 def run_scanner():
-    """Boucle principale du scanner."""
-    tracker = PositionTracker()
-    daily_stats = DailyStats()
+    """Boucle principale du scanner multi-timeframe."""
+    # Un tracker et des stats par strategie
+    trackers = {}
+    daily_stats_all = {}
+    last_scan_times = {}
+
+    for key in cfg.STRATEGIES:
+        trackers[key] = PositionTracker()
+        daily_stats_all[key] = DailyStats()
+        last_scan_times[key] = 0
+
     update_offset = None
     last_summary_date = None
 
@@ -185,108 +276,60 @@ def run_scanner():
         update_offset = old_updates[-1]["update_id"] + 1
 
     # Message de demarrage
+    strat_lines = []
+    for key, sc in cfg.STRATEGIES.items():
+        strat_lines.append(f"  • {sc['label']} — scan {sc['scan_interval']}s — SL {sc['sl_pct']}% / TP {sc['tp_pct']}%")
+
     start_msg = (
-        "\U0001F680 <b>Erwin Strategy 1H — Scanner demarre</b>\n"
+        "\U0001F680 <b>Erwin Strategy — Scanner Multi-TF demarre</b>\n"
         f"Paire : {cfg.SYMBOL}\n"
-        f"Timeframe : {cfg.TIMEFRAME}\n"
-        f"Scan toutes les {cfg.SCAN_INTERVAL}s\n"
-        f"SL : {cfg.SL_PCT}% | TP : {cfg.TP_PCT}%\n"
         f"Mode flat : {cfg.FLAT_MODE}\n\n"
-        f"Commandes : /status /status_1h"
+        f"<b>Strategies actives :</b>\n"
+        + "\n".join(strat_lines) + "\n\n"
+        f"Commande : /status"
     )
     send_telegram(start_msg)
     print(start_msg.replace("<b>", "").replace("</b>", ""))
 
-    scan_interval_short = 30  # polling Telegram toutes les 30s
-
-    last_scan_time = 0
+    poll_interval = 30  # polling Telegram toutes les 30s
 
     while True:
         try:
-            now = datetime.now(timezone.utc)
-            now_ts = now.timestamp()
+            now_ts = time.time()
 
             # ── Polling commandes Telegram (toutes les 30s) ──
-            update_offset = handle_telegram_commands(tracker, update_offset)
+            update_offset = handle_telegram_commands(trackers, update_offset)
 
             # ── Reset stats si nouveau jour ──────────────────
-            daily_stats.check_new_day()
+            for stats in daily_stats_all.values():
+                stats.check_new_day()
 
             # ── Resume quotidien 22h ─────────────────────────
-            last_summary_date = check_daily_summary(last_summary_date, daily_stats)
+            last_summary_date = check_daily_summary(last_summary_date, daily_stats_all)
 
-            # ── Scan strategie (toutes les SCAN_INTERVAL sec) ──
-            if now_ts - last_scan_time >= cfg.SCAN_INTERVAL:
-                last_scan_time = now_ts
-
-                now_str = now.strftime("%Y-%m-%d %H:%M UTC")
-                print(f"\n[{now_str}] Scan en cours...")
-
-                df = fetch_ohlcv(limit=300)
-                df = generate_signals(df)
-                result = get_latest_signal(df)
-
-                last_row = df.iloc[-1]
-
-                # Compter les signaux detectes
-                if result["signal"]:
-                    daily_stats.record_signal(result["signal"])
-
-                # ── Verifier sortie de position ──────────────
-                if tracker.active:
-                    exit_reason = tracker.check_exit(
-                        high=last_row["high"],
-                        low=last_row["low"],
-                        close=last_row["close"],
-                    )
-                    if exit_reason:
-                        direction, entry_price = tracker.close()
-                        daily_stats.record_exit(direction, entry_price, last_row["close"], exit_reason)
-                        notify_exit(
-                            direction=direction,
-                            close_price=last_row["close"],
-                            reason=exit_reason,
-                            entry_price=entry_price,
+            # ── Scan chaque strategie selon son intervalle ────
+            for strat_key, strat_cfg in cfg.STRATEGIES.items():
+                interval = strat_cfg["scan_interval"]
+                if now_ts - last_scan_times[strat_key] >= interval:
+                    last_scan_times[strat_key] = now_ts
+                    try:
+                        scan_strategy(
+                            strat_key, strat_cfg,
+                            trackers[strat_key],
+                            daily_stats_all[strat_key],
                         )
-                        print(f"  >> SORTIE {direction} : {exit_reason}")
-
-                    # Signal inverse
-                    if result["signal"] and result["signal"] != tracker.direction:
-                        direction, entry_price = tracker.close()
-                        reason = f"Signal inverse ({result['signal']})"
-                        daily_stats.record_exit(direction, entry_price, last_row["close"], reason)
-                        notify_exit(
-                            direction=direction,
-                            close_price=last_row["close"],
-                            reason=reason,
-                            entry_price=entry_price,
-                        )
-                        print(f"  >> SORTIE {direction} : signal inverse")
-
-                # ── Verifier entree en position ──────────────
-                if result["signal"] and not tracker.active:
-                    daily_stats.record_entry()
-                    notify_entry(result)
-                    tracker.open(
-                        signal=result["signal"],
-                        entry_price=result["close"],
-                        sl=result["sl"],
-                        tp=result["tp"],
-                    )
-                    print(f"  >> ENTREE {result['signal']} @ {result['close']:.2f}")
-                    print(f"     SL: {result['sl']}  |  TP: {result['tp']}")
-                elif not result["signal"]:
-                    print(f"  Pas de signal | {result['market_state']} | Score: {result['score_bull']}/9")
-
-                if tracker.active:
-                    print(f"  Position ouverte: {tracker.direction} @ {tracker.entry_price:.2f}")
+                    except Exception as e:
+                        label = strat_cfg["label"]
+                        error_msg = f"\u274C <b>Erreur scanner {label} :</b> {e}"
+                        send_telegram(error_msg)
+                        print(f"  [{label}] ERREUR : {e}")
 
         except Exception as e:
             error_msg = f"\u274C <b>Erreur scanner :</b> {e}"
             send_telegram(error_msg)
             print(f"  ERREUR : {e}")
 
-        time.sleep(scan_interval_short)
+        time.sleep(poll_interval)
 
 
 if __name__ == "__main__":
